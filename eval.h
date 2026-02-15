@@ -1,20 +1,16 @@
 #ifndef EVAL_H
 #define EVAL_H
 
-#include <string>
-
-#include "board.h"
-
 namespace eval {
-
 struct Params {
-  int piece[6] = {100, 320, 330, 500, 900, 0};
+  int pawn = 100;
+  int knight = 320;
+  int bishop = 330;
+  int rook = 500;
+  int queen = 900;
 };
 
-void initialize(Params& p);
-int evaluate(const board::Board& b, const Params& p);
-std::string breakdown(const board::Board& b, const Params& p);
-
+inline void initialize(Params&) {}
 }  // namespace eval
 
 #endif

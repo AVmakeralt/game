@@ -3,13 +3,11 @@
 
 #include <array>
 #include <cstdint>
-#include <cmath>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
-#include <algorithm>
 #include <vector>
 
 #include "movegen.h"
@@ -68,23 +66,6 @@ struct KillerTable {
 
 struct HistoryHeuristic {
   std::array<std::array<int, 64>, 64> score{};
-  std::array<std::array<int, 64>, 64> success{};
-  std::array<std::array<int, 64>, 64> fail{};
-
-  int adaptiveScore(int from, int to) const {
-    int s = score[from][to];
-    int ok = success[from][to];
-    int bad = fail[from][to];
-    int ratio = ok * 100 / std::max(1, ok + bad);
-    return s + ratio;
-  }
-
-  void recordSuccess(int from, int to, int bonus) {
-    score[from][to] += bonus;
-    success[from][to] += 1;
-  }
-
-  void recordFail(int from, int to) { fail[from][to] += 1; }
 };
 
 struct CounterMoveTable {
@@ -98,24 +79,6 @@ struct PVTable {
 
 struct SEE {
   int estimate(const movegen::Move&) const { return 0; }
-};
-
-struct TacticalSolver {
-  int forcingScore(const movegen::Move& m) const {
-    int score = 0;
-    if (m.promotion != '\0') score += 300;
-    if (m.from >= 0 && m.to >= 0 && std::abs((m.to / 8) - (m.from / 8)) >= 2) score += 60;
-    return score;
-  }
-};
-
-struct DynamicPVWeights {
-  std::unordered_map<std::string, int> weights;
-  int get(const std::string& key) const {
-    auto it = weights.find(key);
-    return it == weights.end() ? 0 : it->second;
-  }
-  void reward(const std::string& key, int delta) { weights[key] += delta; }
 };
 
 struct SearchResultCache {
@@ -181,19 +144,29 @@ struct EndgameHeuristics {
   bool enabled = true;
   int kingPawnPattern = 0;
   int specializedScore = 0;
-  int opposition = 0;
-  int triangulation = 0;
-  int zugzwang = 0;
+  int evaluate(bool deepEndgame) const { return deepEndgame ? kingPawnPattern + specializedScore : 0; }
+};
 
-  int evaluate(bool deepEndgame) const {
-    if (!deepEndgame) return 0;
-    return kingPawnPattern + specializedScore + opposition + triangulation + zugzwang;
+struct NNUE {
+  bool enabled = false;
+  std::string weightsPath = "nnue.bin";
+  bool load(const std::string& path) {
+    weightsPath = path;
+    enabled = true;
+    return true;
   }
+  int evaluate() const { return 0; }
+};
+
+struct PolicyNet {
+  bool enabled = false;
+  std::vector<float> priors;
 };
 
 struct LossLearning {
   int lossCases = 0;
   int adversarialTests = 0;
+
   void recordLoss() { ++lossCases; }
   void runAdversarialSweep() { ++adversarialTests; }
 };
@@ -208,14 +181,6 @@ struct TrainingInfra {
 }  // namespace eval_model
 
 namespace search_arch {
-struct PhaseContext {
-  int threatDensity = 0;
-  int kingSafety = 0;
-  int materialImbalance = 0;
-  int pawnTropism = 0;
-  bool endgame = false;
-};
-
 struct Features {
   bool usePVS = true;
   bool useAspiration = true;
@@ -226,19 +191,10 @@ struct Features {
   bool useMateDistancePruning = true;
   bool useExtensions = true;
   bool useMultiPV = true;
+  bool useMCTS = false;
   bool useParallel = false;
   bool useAsync = false;
   bool useMultiRateThinking = true;
-  bool useAdaptiveMoveOrdering = true;
-  bool useAdaptiveLmr = true;
-  bool usePhaseAwareFutility = true;
-  bool useThreatExtensions = true;
-  bool useTacticalPrefilter = true;
-  bool useSelectiveDeepening = true;
-  bool useIID = true;
-  bool useLMP = true;
-  bool useProbabilisticPruning = true;
-  bool useMCTS = false;
   int multiPV = 1;
 };
 
@@ -248,7 +204,6 @@ struct ParallelConfig {
   bool treeSplit = false;
   bool hashSync = false;
   bool loadBalancing = false;
-  bool numaAware = false;
 };
 
 struct MCTSConfig {
@@ -264,15 +219,6 @@ struct Book {
   std::string path = "book.bin";
 
   std::string probe() const { return ""; }
-};
-
-struct DynamicWeights {
-  std::unordered_map<std::string, int> lineScore;
-  int weight(const std::string& key) const {
-    auto it = lineScore.find(key);
-    return it == lineScore.end() ? 0 : it->second;
-  }
-  void update(const std::string& key, int delta) { lineScore[key] += delta; }
 };
 
 struct Novelty {
@@ -292,7 +238,6 @@ struct BookBuilder {
 struct PrepModule {
   bool noveltySearch = false;
   bool pruneBook = false;
-  DynamicWeights dynamicWeights;
   Novelty novelty;
   BookBuilder builder;
 };

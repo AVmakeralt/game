@@ -2,37 +2,30 @@
 #define TT_H
 
 #include <cstddef>
-#include <cstdint>
 #include <vector>
-
-#include "board.h"
-#include "movegen.h"
 
 namespace tt {
 
-enum Bound : int { EXACT = 0, LOWER = 1, UPPER = 2 };
-
 struct Entry {
-  std::uint64_t key = 0;
-  int depth = -1;
+  unsigned long long key = 0;
+  int depth = 0;
   int score = 0;
-  Bound bound = EXACT;
-  movegen::Move bestMove{};
 };
 
-class Table {
- public:
-  void initialize(std::size_t mb);
-  void clear();
-  bool probe(std::uint64_t key, Entry& out) const;
-  void store(const Entry& e);
+struct Table {
+  std::vector<Entry> entries;
 
- private:
-  std::vector<Entry> entries_;
+  void initialize(std::size_t mb) {
+    std::size_t bytes = mb * 1024ULL * 1024ULL;
+    std::size_t count = bytes / sizeof(Entry);
+    if (count == 0) {
+      count = 1;
+    }
+    entries.assign(count, Entry{});
+  }
+
+  void clear() { entries.assign(entries.size(), Entry{}); }
 };
-
-void initializeZobrist();
-std::uint64_t hash(const board::Board& b);
 
 }  // namespace tt
 

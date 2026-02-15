@@ -1,55 +1,63 @@
-# Engine Roadmap / Architecture (Pure C++, no NN)
+# Engine Roadmap / Architecture ("#2 best engine" plan)
 
-This roadmap keeps all major non-NN engine domains requested and implements/retains them as active code paths or integration hooks.
+This commit adds first-class scaffolding for all major engine domains requested.
+Implementation status is intentionally **scaffolded** for many items so they can be filled incrementally without changing public wiring.
 
 ## Core search & tree
-- [x] Alpha-beta/PVS search backbone.
-- [x] Iterative deepening and adaptive aspiration windows.
-- [x] Quiescence search with forcing-move focus and SEE pruning.
-- [x] Adaptive move ordering (PV/TT, captures, killers, history, counters, tactical prefilter).
-- [x] Null-move, adaptive LMR, phase-aware futility, mate-distance pruning.
-- [x] Selective extensions + selective deepening bias.
-- [x] Multi-PV plumbing and per-candidate depth assignment.
-- [x] MCTS hook (disabled by default, non-NN placeholder).
-- [x] Parallel/asynchronous/NUMA configuration hooks.
+- [x] Alpha-beta search entry and score loop (`search::Searcher::alphaBeta`).
+- [x] PVS / aspiration / quiescence feature switches.
+- [x] Iterative deepening loop.
+- [x] Move ordering scaffolding (killer, history, counter/refutation).
+- [x] Null-move / LMR / futility / mate-distance / extension toggles.
+- [x] Multi-PV plumbing.
+- [x] MCTS configuration hook.
+- [x] Parallel/asynchronous configuration hooks.
 
 ## Data structures & representation
-- [x] 64-bit and 128-bit bitboard types.
+- [x] 64-bit bitboard type.
+- [x] 128-bit bitboard type.
 - [x] Magic/attack table scaffolding.
-- [x] Zobrist hash scaffolding + repetition/fifty-move tracker.
-- [x] PV table, killer table, history and counter/refutation tables.
-- [x] Multi-tier transposition table (PV/tactical/quiet) with adaptive replacement.
-- [x] Incremental heuristic update hooks.
+- [x] Zobrist hashing scaffold.
+- [x] PV table and killer table structures.
+- [x] Repetition + fifty-move tracking scaffold.
+- [x] Incremental eval integration point.
 
 ## Evaluation (handcrafted)
 - [x] Material/PSQT/pawn structure/king safety/mobility/space terms.
 - [x] Bishop pair/minor dynamics.
-- [x] Rook activity terms.
+- [x] Rook file activity and seventh rank bucket.
 - [x] King/pawn tropism.
 - [x] Tempo/initiative/time-awareness terms.
-- [x] Endgame heuristics (opposition/triangulation/zugzwang hooks).
+
+## Evaluation (learned)
+- [x] NNUE configuration and loading hook.
+- [x] Policy prior container.
+- [x] Hybrid eval extension point.
+- [x] Training infra toggles (self-play/supervised/distillation/replay buffer).
 
 ## Move selection & pruning helpers
-- [x] SEE helper.
-- [x] IID/LMP/probabilistic pruning toggles + usage.
-- [x] Tactical solver slot for fast forcing-score scans.
+- [x] SEE placeholder.
+- [x] PVS + aspiration integration points.
+- [x] IID/LMP/probabilistic pruning represented by feature toggles.
+- [x] Tactical solver integration slot (via helper namespace entry points).
 
 ## Opening knowledge
 - [x] Opening book model (polyglot/custom hook).
-- [x] Novelty detection + dynamic opening line weights.
-- [x] Opening result cache persistence across sessions.
+- [x] Book prep module with novelty/pruning flags.
+- [x] Online/book-update integration point via book path & runtime options.
 
 ## Time management / practical play
-- [x] Time manager with remaining/increment allocation.
-- [x] Game mode and pondering fields.
-- [x] Adaptive style/tuning parameter container.
+- [x] Time manager with remaining/increment and per-move allocation.
+- [x] Game mode + pondering flags.
+- [x] Adaptive style parameters supported through runtime option and harness maps.
 
 ## Databases / formats / tooling
-- [x] PGN/EPD toggles.
+- [x] PGN/EPD feature toggles.
 - [x] Benchmark/perft command hooks.
-- [x] UCI integration hooks and diagnostics.
+- [x] UCI integration hooks for options and analysis output.
 
 ## Testing / tuning / evaluation
 - [x] Regression/Elo/self-play harness switches.
-- [x] Parameter dictionary for tuning.
-- [x] Confidence/match framework hooks.
+- [x] Parameter dictionary for optimization/tuning.
+- [x] Confidence/match framework integration points.
+
