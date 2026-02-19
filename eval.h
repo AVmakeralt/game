@@ -20,9 +20,6 @@ struct Params {
   int kingSafetyPhaseMaskBonus = 10;
   int endgameKingActivityBonus = 10;
   int openingMobilityBonus = 8;
-  int permanentHolePenalty = 12;
-  int colorComplexCommitmentPenalty = 8;
-  int fakeActivityPenalty = 10;
 };
 
 void initialize(Params& params);

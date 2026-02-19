@@ -68,18 +68,10 @@ class Searcher {
   Result think(const board::Board& b, const Limits& limits, std::mt19937& rng, bool* stopFlag) {
     Result out;
     boardSnapshot_ = b;
-    const auto moves = movegen::generateLegal(b);
+    const auto moves = movegen::generatePseudoLegal(b);
     nodeCounter_ = 0;
     strategyCadence_ = std::max(4, limits.depth * 2);
     strategyCached_ = false;
-    lastIterationScore_ = 0;
-    alphaBetaViolations_ = 0;
-    ttHits_ = 0;
-    ttStores_ = 0;
-    horizonOscillations_ = 0;
-    if (tt_) tt_->nextGeneration();
-    stabilityStreak_ = 0;
-    lastBestMove_ = {};
     std::uint64_t occ = 0ULL;
     for (int sq = 0; sq < 64; ++sq) if (boardSnapshot_.squares[static_cast<std::size_t>(sq)] != '.') occ |= (1ULL << sq);
     temporal_.push(occ);
@@ -141,9 +133,6 @@ class Searcher {
   mutable bool strategyCached_ = false;
   mutable engine_components::eval_model::NNUE::Accumulator nnueAccumulator_{};
   engine_components::representation::TemporalBitboard temporal_{};
-  int lastIterationScore_ = 0;
-  int stabilityStreak_ = 0;
-  movegen::Move lastBestMove_{};
 
   void assignCandidateDepths(Result& out, int candidateCount, int rootDepth) const {
     out.candidateDepths.assign(candidateCount, rootDepth);
@@ -228,21 +217,6 @@ class Searcher {
 
       int score = alphaBeta(depth, alpha, beta);
       if (strategyNet_ && strategyNet_->enabled) strategyCached_ = false;
-
-      const int delta = std::abs(score - lastIterationScore_);
-      const bool signFlip = (depth > 1) && ((score > 0) != (lastIterationScore_ > 0));
-      if (signFlip) {
-        score = (score + lastIterationScore_) / 2;
-        stabilityStreak_ = 0;
-      } else if (delta < 24) {
-        ++stabilityStreak_;
-        score += std::min(12, stabilityStreak_ * 2);
-      } else if (delta > 120) {
-        score -= std::min(20, delta / 16);  // penalize high volatility
-        stabilityStreak_ = 0;
-        ++horizonOscillations_;
-      }
-
       if (features_.useAspiration) {
         alpha = score - 50;
         beta = score + 50;
@@ -254,54 +228,6 @@ class Searcher {
         ordered.push_back({moveOrderingBias(m, depth), m});
       }
       std::sort(ordered.begin(), ordered.end(), [](const auto& lhs, const auto& rhs) { return lhs.first > rhs.first; });
-
-      if (features_.useMCTS && mctsCfg_.useCladeSelection && !ordered.empty()) {
-        std::array<int, 4> cladeSeen{{0, 0, 0, 0}};
-        std::vector<std::pair<int, movegen::Move>> claded;
-        claded.reserve(ordered.size());
-        const int maxPerClade = std::max(1, mctsCfg_.miniBatchSize / 128);
-        for (const auto& entry : ordered) {
-          const int cid = cladeId(entry.second);
-          if (cladeSeen[static_cast<std::size_t>(cid)] >= maxPerClade) continue;
-          ++cladeSeen[static_cast<std::size_t>(cid)];
-          claded.push_back(entry);
-        }
-        if (!claded.empty()) ordered.swap(claded);
-      }
-
-      const float phaseMix = m2ctsPhaseMixScore(depth);
-      for (std::size_t i = 0; i < ordered.size(); ++i) {
-        ordered[i].first += static_cast<int>(phaseMix);
-        ordered[i].first = applyVirtualLossPenalty(ordered[i].first, static_cast<int>(i % std::max(1, mctsCfg_.miniBatchSize)));
-        if (features_.useMCTS) {
-          const int batchPenalty = static_cast<int>((i / std::max(1, mctsCfg_.miniBatchSize)) * 4);
-          ordered[i].first -= batchPenalty;
-        }
-      }
-
-      if (features_.usePolicyValuePruning && strategyNet_ && strategyNet_->enabled && !ordered.empty()) {
-        const auto& sOut = getStrategyOutput(false);
-        if (!sOut.policy.empty()) {
-          const float maxLogit = *std::max_element(sOut.policy.begin(), sOut.policy.end());
-          float denom = 0.0f;
-          for (float logit : sOut.policy) denom += std::exp(logit - maxLogit);
-          denom = std::max(1e-6f, denom);
-
-          std::vector<std::pair<int, movegen::Move>> filtered;
-          filtered.reserve(ordered.size());
-          for (const auto& entry : ordered) {
-            const auto& m = entry.second;
-            const bool isCapture = boardSnapshot_.squares[static_cast<std::size_t>(m.to)] != '.';
-            const bool tacticalMove = isCapture || m.promotion != '\0';
-            const std::size_t policyIdx = static_cast<std::size_t>((m.from * 64 + m.to) % static_cast<int>(sOut.policy.size()));
-            const float prob = std::exp(sOut.policy[policyIdx] - maxLogit) / denom;
-            if (prob >= features_.policyValuePruneFloor || tacticalMove) {
-              filtered.push_back(entry);
-            }
-          }
-          if (!filtered.empty()) ordered.swap(filtered);
-        }
-      }
       if (features_.usePolicyPruning) {
         int keep = std::max(1, std::min(features_.policyTopK, static_cast<int>(ordered.size())));
         if (strategyNet_ && strategyNet_->enabled) {
@@ -311,56 +237,34 @@ class Searcher {
             float sumExp = 0.0f;
             for (float logit : sOut.policy) sumExp += std::exp(logit - maxLogit);
             const float topProb = 1.0f / std::max(1e-6f, sumExp);
-            const float adjustedThreshold = features_.policyPruneThreshold - mctsCfg_.fpuReduction * 0.1f;
-            if (topProb >= adjustedThreshold) keep = 1;
+            if (topProb >= features_.policyPruneThreshold) keep = 1;
           }
         }
         ordered.resize(static_cast<std::size_t>(keep));
       }
 
 
+      std::vector<std::future<int>> scouts;
+      const int scoutCount = std::min(7, static_cast<int>(ordered.size()));
+      for (int i = 0; i < scoutCount; ++i) {
+        const movegen::Move scoutMove = ordered[static_cast<std::size_t>(i)].second;
+        scouts.push_back(std::async(std::launch::async, [this, scoutMove, depth]() {
+          return evaluateMoveLazy(scoutMove, depth + 1, true);
+        }));
+      }
+
       int bestScore = -300000;
-      out.bestMove = ordered.empty() ? (parallelCfg_.deterministicMode ? moves.front() : moves[d(rng)]) : ordered.front().second;
+      out.bestMove = ordered.empty() ? moves[d(rng)] : ordered.front().second;
       const int masterCount = std::max(1, std::min(features_.masterEvalTopMoves, static_cast<int>(ordered.size())));
-
-      const bool enableYBWC = features_.useParallel && parallelCfg_.threads > 1 &&
-                              depth <= parallelCfg_.splitDepthLimit && ordered.size() > 1;
-      std::size_t startIdx = 0;
-      if (enableYBWC && parallelCfg_.ybwcFirstMoveSerial) {
-        const bool useMaster0 = !features_.useLazyEval || 0 < static_cast<std::size_t>(masterCount);
-        const int firstScore = evaluateMoveLazy(ordered[0].second, depth, useMaster0);
-        bestScore = firstScore;
-        out.bestMove = ordered[0].second;
-        startIdx = 1;
-      }
-
-      std::vector<std::future<std::pair<int, movegen::Move>>> workers;
-      if (enableYBWC) {
-        const std::size_t splitBudget = std::min<std::size_t>(ordered.size(), static_cast<std::size_t>(parallelCfg_.maxSplitMoves));
-        for (std::size_t i = startIdx; i < splitBudget; ++i) {
-          const auto mv = ordered[i].second;
-          const bool useMaster = !features_.useLazyEval || static_cast<int>(i) < masterCount;
-          workers.push_back(std::async(std::launch::async, [this, mv, depth, useMaster]() {
-            const int sc = evaluateMoveLazyThreadSafe(mv, depth, useMaster);
-            return std::make_pair(sc, mv);
-          }));
-        }
-      }
-
-      for (std::size_t i = startIdx; i < ordered.size(); ++i) {
+      for (std::size_t i = 0; i < ordered.size(); ++i) {
         const bool useMaster = !features_.useLazyEval || static_cast<int>(i) < masterCount;
         int candidate = evaluateMoveLazy(ordered[i].second, depth, useMaster);
+        if (i < scouts.size()) {
+          candidate = std::max(candidate, scouts[i].get());
+        }
         if (candidate > bestScore) {
           bestScore = candidate;
           out.bestMove = ordered[i].second;
-        }
-      }
-
-      for (auto& w : workers) {
-        const auto result = w.get();
-        if (result.first > bestScore) {
-          bestScore = result.first;
-          out.bestMove = result.second;
         }
       }
       out.nodes += depth * 1000;
@@ -390,20 +294,6 @@ class Searcher {
     }
 
     ++nodeCounter_;
-    const int alphaOrig = alpha;
-    const int betaOrig = beta;
-    const std::uint64_t key = positionKey(boardSnapshot_);
-    if (tt_) {
-      tt::Entry e;
-      if (tt_->probe(key, e) && e.depth >= depth) {
-        ++ttHits_;
-        if (e.bound == tt::Bound::Exact) return e.score;
-        if (e.bound == tt::Bound::Lower) alpha = std::max(alpha, e.score);
-        if (e.bound == tt::Bound::Upper) beta = std::min(beta, e.score);
-        if (alpha >= beta) return e.score;
-      }
-    }
-    if (isInsufficientMaterial(boardSnapshot_) || isLikelyRepetition(boardSnapshot_)) return 0;
     int score = 20 * depth;
     if (features_.usePVS) score += 2;
     if (features_.useNullMove) score += 1;
@@ -486,7 +376,15 @@ class Searcher {
       }
     }
 
-    return std::clamp(best, alpha, beta);
+    if (strategyNet_ && strategyNet_->enabled) {
+      const auto& out = getStrategyOutput(false);
+      const float tacticalPressure = (out.tacticalThreat[0] + out.tacticalThreat[1]);
+      if (tacticalPressure < 0.05f) {
+        beta -= 2;  // soft quiescence pruning when no tactical pressure is predicted
+      }
+    }
+
+    return std::clamp(standPat, alpha, beta);
   }
 
 
@@ -573,17 +471,6 @@ class Searcher {
       score += static_cast<int>(wdlEdge * 40.0f);
     }
     return score;
-  }
-
-  int evaluateMoveLazyThreadSafe(const movegen::Move& move, int depth, bool useMaster) const {
-    int score = 0;
-    if (history_) score += history_->score[move.from][move.to] * 2;
-    score += static_cast<int>(__builtin_popcountll(temporal_.velocityMask()) / 8);
-    if (nnue_ && nnue_->enabled) {
-      if (useMaster) score += nnue_->evaluateFromAccumulator(nnueAccumulator_) / 24;
-      else score += nnue_->evaluateDraft(nnueAccumulator_.features) / 24;
-    }
-    return score + depth;
   }
 
   void updateHeuristics(int ply, const movegen::Move& best) {

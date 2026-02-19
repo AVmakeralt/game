@@ -196,8 +196,6 @@ struct NNUEConfig {
   bool useSCReLU = true;  // squared clipped ReLU in first hidden layer
   bool useAMXPath = false;
   int draftHidden1 = 512; // tiny fast path width for lazy evaluation
-  int miniQSearchHidden = 256;
-  float policyPruneFloor = 0.05f;
 };
 
 struct NNUE {
@@ -432,21 +430,6 @@ struct NNUE {
     return static_cast<int>(std::lround(out * 64.0f));
   }
 
-  int evaluateMiniQSearch(const std::vector<float>& input) const {
-    if (!enabled || input.empty() || w1.empty()) return 0;
-    const int mini = std::max(32, std::min(cfg.hidden1, cfg.miniQSearchHidden));
-    float out = b3;
-    for (int h = 0; h < mini; ++h) {
-      float v = b1[static_cast<std::size_t>(h)];
-      for (int i = 0; i < cfg.inputs; ++i) {
-        if (input[static_cast<std::size_t>(i)] == 0.0f) continue;
-        v += input[static_cast<std::size_t>(i)] * w1[static_cast<std::size_t>(h * cfg.inputs + i)];
-      }
-      out += std::max(0.0f, v) * w3[static_cast<std::size_t>(h % cfg.hidden2)];
-    }
-    return static_cast<int>(std::lround(out * 48.0f));
-  }
-
   int evaluateFromAccumulator(const Accumulator& acc) const {
     if (!enabled || !acc.initialized || acc.hidden1.empty() || w2.empty()) return 0;
     std::vector<float> h2(static_cast<std::size_t>(cfg.hidden2), 0.0f);
@@ -465,18 +448,7 @@ struct NNUE {
 
   int evaluateAMXKernel(const std::vector<float>& input) const {
 #ifdef __APPLE__
-    // Accelerate/AMX-oriented half-precision GEMM path for the first projection.
-    std::vector<float> h1(static_cast<std::size_t>(cfg.hidden1), 0.0f);
-    const float alpha = 1.0f;
-    const float beta = 0.0f;
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                cfg.hidden1, 1, cfg.inputs,
-                alpha,
-                w1.data(), cfg.inputs,
-                input.data(), 1,
-                beta,
-                h1.data(), 1);
-    // Finish with existing code path for consistency and bias application.
+    // Placeholder for Accelerate/AMX dispatch; keep equivalent semantics for now.
     Accumulator acc;
     initializeAccumulator(acc, input);
     return evaluateFromAccumulator(acc);
@@ -879,11 +851,9 @@ struct Features {
   bool useAsync = false;
   bool useMultiRateThinking = true;
   bool usePolicyPruning = true;
-  bool usePolicyValuePruning = true;
   bool useLazyEval = true;
   int policyTopK = 5;
   float policyPruneThreshold = 0.90f;
-  float policyValuePruneFloor = 0.05f;
   int masterEvalTopMoves = 3;
   int multiPV = 1;
 };
@@ -977,62 +947,6 @@ struct Integrity {
   bool antiCheatEnabled = false;
   bool checksumOk = true;
   bool verifyRuntime() const { return !antiCheatEnabled || checksumOk; }
-};
-
-struct TrainingMetrics {
-  float currentLoss = 0.0f;
-  float eloGain = 0.0f;
-  int nodesPerSecond = 0;
-  std::array<char, 256> statusMsg{};
-};
-
-struct SharedMetricsIPC {
-  std::string path = "training_metrics.ipc";
-  TrainingMetrics metrics{};
-
-  bool write(const TrainingMetrics& m) {
-    metrics = m;
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out) return false;
-    out.write(reinterpret_cast<const char*>(&metrics), static_cast<std::streamsize>(sizeof(metrics)));
-    return static_cast<bool>(out);
-  }
-
-  bool read(TrainingMetrics& outMetrics) const {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) return false;
-    in.read(reinterpret_cast<char*>(&outMetrics), static_cast<std::streamsize>(sizeof(outMetrics)));
-    return static_cast<bool>(in);
-  }
-};
-
-struct BinpackReader {
-  std::string path = "selfplay.binpack";
-  int threads = 1;
-
-  std::vector<std::vector<std::uint8_t>> readChunks(std::size_t chunkBytes) const {
-    std::ifstream in(path, std::ios::binary);
-    if (!in || chunkBytes == 0) return {};
-
-    std::vector<std::vector<std::uint8_t>> chunks;
-    while (true) {
-      std::vector<std::uint8_t> buf(chunkBytes);
-      in.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(chunkBytes));
-      const auto got = in.gcount();
-      if (got <= 0) break;
-      buf.resize(static_cast<std::size_t>(got));
-      chunks.push_back(std::move(buf));
-      if (in.eof()) break;
-    }
-    return chunks;
-  }
-
-  std::size_t estimatePositionThroughput(std::size_t bytesPerPosition = 32) const {
-    const auto chunks = readChunks(1 << 20);
-    std::size_t totalBytes = 0;
-    for (const auto& c : chunks) totalBytes += c.size();
-    return bytesPerPosition == 0 ? 0 : totalBytes / bytesPerPosition;
-  }
 };
 
 struct RamTablebase {

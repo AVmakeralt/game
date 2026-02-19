@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <cctype>
-#include <cstring>
 #include <fstream>
 #include <numeric>
 #include <iostream>
@@ -137,13 +136,31 @@ void initialize(State& state) {
   state.repetition.clear();
   state.perftNodes = 0;
 
+  int pieceCount = 0;
+  int whiteNonKing = 0;
+  int blackNonKing = 0;
+  for (char piece : state.board.squares) {
+    if (piece == '.') continue;
+    ++pieceCount;
+    const char p = static_cast<char>(std::tolower(static_cast<unsigned char>(piece)));
+    if (p == 'k') continue;
+    if (std::isupper(static_cast<unsigned char>(piece))) ++whiteNonKing;
+    else ++blackNonKing;
+  }
+  if (pieceCount <= 6) {
+    const std::string tbKey = "K" + std::to_string(whiteNonKing) + "v" + std::to_string(blackNonKing);
+    const int tbWdl = state.ramTablebase.probe(tbKey);
+    if (tbWdl != 0) {
+      std::cout << "info string ram_tablebase hit key=" << tbKey << " wdl=" << tbWdl << '\n';
+    }
+  }
+
   state.stopRequested = false;
   state.features.multiPV = 1;
   state.parallel.threads = 1;
   state.mcts.enabled = false;
   state.policy.enabled = true;
   state.features.usePolicyPruning = true;
-  state.features.usePolicyValuePruning = true;
   state.features.policyTopK = state.strategyNet.cfg.topKForPruning;
   state.features.policyPruneThreshold = state.strategyNet.cfg.pruneThreshold;
   state.features.useLazyEval = true;
@@ -151,7 +168,6 @@ void initialize(State& state) {
   state.nnue.load("nnue.bin");
   state.strategyNet.load("strategy_large.nn");
   state.policy.priors = {0.70f, 0.20f, 0.10f};
-  state.book.seedDefaults();
   state.ramTablebase.enabled = false;
   state.cache.load(state.openingCachePath);
   state.logFile.open("engine.log", std::ios::app);
@@ -180,13 +196,10 @@ void printUciId() {
   std::cout << "option name MCTSFpuReduction type string default 0.20\n";
   std::cout << "option name EnableCAT type check default true\n";
   std::cout << "option name UseStrategyNN type check default true\n";
-  std::cout << "option name UseBook type check default false\n";
   std::cout << "option name StrategyPolicyOutputs type spin default 4096 min 64 max 4096\n";
   std::cout << "option name UseMultiRateThinking type check default true\n";
   std::cout << "option name EnableDistillation type check default false\n";
   std::cout << "option name UsePolicyPruning type check default true\n";
-  std::cout << "option name UsePolicyValuePruning type check default true\n";
-  std::cout << "option name PolicyValuePruneFloor type string default 0.05\n";
   std::cout << "option name PolicyTopK type spin default 5 min 1 max 32\n";
   std::cout << "option name UseLazyEval type check default true\n";
   std::cout << "option name MasterEvalTopMoves type spin default 3 min 1 max 8\n";
@@ -194,8 +207,6 @@ void printUciId() {
   std::cout << "option name StrategyUseHardPhaseSwitch type check default true\n";
   std::cout << "option name StrategyActiveExperts type spin default 2 min 1 max 2\n";
   std::cout << "option name UseRamTablebase type check default false\n";
-  std::cout << "option name MetricsIPCPath type string default training_metrics.ipc\n";
-  std::cout << "option name BinpackPath type string default selfplay.binpack\n";
   std::cout << "option name AntiCheat type check default false\n";
   std::cout << "uciok\n";
 }
@@ -266,10 +277,6 @@ void handleSetOption(State& state, const std::string& cmd) {
     state.training.distillationEnabled = (value == "true");
   } else if (name == "UsePolicyPruning") {
     state.features.usePolicyPruning = (value == "true");
-  } else if (name == "UsePolicyValuePruning") {
-    state.features.usePolicyValuePruning = (value == "true");
-  } else if (name == "PolicyValuePruneFloor") {
-    state.features.policyValuePruneFloor = std::max(0.0f, std::stof(value));
   } else if (name == "PolicyTopK") {
     state.features.policyTopK = std::max(1, std::stoi(value));
   } else if (name == "UseLazyEval") {
@@ -285,10 +292,6 @@ void handleSetOption(State& state, const std::string& cmd) {
   } else if (name == "UseRamTablebase") {
     state.ramTablebase.enabled = (value == "true");
     if (state.ramTablebase.enabled && !state.ramTablebase.loaded) state.ramTablebase.preload6ManMock();
-  } else if (name == "MetricsIPCPath") {
-    state.tests.ipc.path = value;
-  } else if (name == "BinpackPath") {
-    state.tests.binpack.path = value;
   } else if (name == "AntiCheat") {
     state.integrity.antiCheatEnabled = (value == "true");
   }
@@ -515,26 +518,9 @@ void runLoop(State& state) {
             : std::accumulate(strategy.policy.begin(), strategy.policy.end(), 0.0f) / static_cast<float>(strategy.policy.size());
         state.nnue.distillStrategicHint(policySignal, static_cast<float>(strategy.valueCp) / 1000.0f);
       }
-      if (state.training.cat.enabled) {
-        const int low = state.training.cat.lowBudgetNodes;
-        const int high = state.training.cat.highBudgetNodes;
-        const int gap = std::max(0, high - low);
-        std::cout << "info string cat_compare low=" << low << " high=" << high
-                  << " gap=" << gap
-                  << " threshold=" << state.training.cat.disagreementThreshold << '\n';
-      }
       std::cout << "info string loss_learning cases=" << state.training.lossLearning.lossCases
                 << " adversarial=" << state.training.lossLearning.adversarialTests
                 << " distill=" << (state.training.distillationEnabled ? "on" : "off") << '\n';
-    } else if (input == "searchaudit") {
-      const auto historyNonZero = std::count_if(state.history.score.begin(), state.history.score.end(),
-        [](const auto& row){ return std::any_of(row.begin(), row.end(), [](int v){ return v != 0; }); });
-      std::cout << "info string search_audit tt_entries=" << state.tt.entries.size()
-                << " tt_generation=" << static_cast<int>(state.tt.generation)
-                << " history_nonzero=" << historyNonZero
-                << " killer_slots=" << state.killer.killer.size()
-                << " book_entries=" << state.book.moveByKey.size()
-                << " book_enabled=" << (state.book.enabled ? "true" : "false") << '\n';
     } else if (input == "integrity") {
       std::cout << "info string integrity " << (state.integrity.verifyRuntime() ? "ok" : "failed") << '\n';
     } else if (input == "explain") {

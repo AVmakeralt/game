@@ -42,10 +42,6 @@ int evaluate(const board::Board& b, const Params& params) {
   int blackMajor = 0;
   int whiteKingSq = -1;
   int blackKingSq = -1;
-  int whiteLightPawns = 0;
-  int whiteDarkPawns = 0;
-  int blackLightPawns = 0;
-  int blackDarkPawns = 0;
   std::array<int, 8> whitePawnsByFile{};
   std::array<int, 8> blackPawnsByFile{};
 
@@ -76,14 +72,8 @@ int evaluate(const board::Board& b, const Params& params) {
     if (c == 'r' || c == 'q') ++blackMajor;
     if (c == 'K') whiteKingSq = sq;
     if (c == 'k') blackKingSq = sq;
-    if (c == 'P') {
-      ++whitePawnsByFile[static_cast<std::size_t>(sq % 8)];
-      ((sq + (sq / 8)) % 2 == 0 ? ++whiteLightPawns : ++whiteDarkPawns);
-    }
-    if (c == 'p') {
-      ++blackPawnsByFile[static_cast<std::size_t>(sq % 8)];
-      ((sq + (sq / 8)) % 2 == 0 ? ++blackLightPawns : ++blackDarkPawns);
-    }
+    if (c == 'P') ++whitePawnsByFile[static_cast<std::size_t>(sq % 8)];
+    if (c == 'p') ++blackPawnsByFile[static_cast<std::size_t>(sq % 8)];
   }
 
   if (whiteBishops >= 2) score += params.bishopPairBonus;
@@ -153,32 +143,6 @@ int evaluate(const board::Board& b, const Params& params) {
     score += (whiteMinor + whiteMajor) * params.openingMobilityBonus;
     score -= (blackMinor + blackMajor) * params.openingMobilityBonus;
   }
-
-  auto permanentHoleScore = [&](bool whiteSide) {
-    int holes = 0;
-    const auto& files = whiteSide ? whitePawnsByFile : blackPawnsByFile;
-    for (int file = 1; file <= 6; ++file) {
-      const bool fileEmpty = files[static_cast<std::size_t>(file)] == 0;
-      const bool flankSupport = files[static_cast<std::size_t>(file - 1)] > 0 || files[static_cast<std::size_t>(file + 1)] > 0;
-      if (fileEmpty && !flankSupport) ++holes;
-    }
-    return holes * params.permanentHolePenalty;
-  };
-
-  score -= permanentHoleScore(true);
-  score += permanentHoleScore(false);
-
-  const int whiteColorCommit = std::abs(whiteLightPawns - whiteDarkPawns);
-  const int blackColorCommit = std::abs(blackLightPawns - blackDarkPawns);
-  score -= whiteColorCommit * params.colorComplexCommitmentPenalty;
-  score += blackColorCommit * params.colorComplexCommitmentPenalty;
-
-  const int whiteActivity = (whiteMinor + whiteMajor) * 4;
-  const int blackActivity = (blackMinor + blackMajor) * 4;
-  const int whiteCenterGuard = whitePawnsByFile[3] + whitePawnsByFile[4];
-  const int blackCenterGuard = blackPawnsByFile[3] + blackPawnsByFile[4];
-  if (whiteActivity > 20 && whiteCenterGuard == 0) score -= params.fakeActivityPenalty;
-  if (blackActivity > 20 && blackCenterGuard == 0) score += params.fakeActivityPenalty;
 
   score += b.whiteToMove ? params.tempoBonus : -params.tempoBonus;
 
