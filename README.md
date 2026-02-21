@@ -1,6 +1,6 @@
 # Game Chess Engine (C++)
 
-A CPU-only UCI chess engine with legal move generation, alpha-beta/PVS style search, quiescence, transposition table, and perft verification commands.
+A chess engine with legal move generation, alpha-beta/PVS style search, quiescence, transposition table, and perft verification commands.
 
 ## Build
 
