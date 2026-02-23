@@ -494,6 +494,11 @@ struct NNUE {
     return static_cast<int>(std::lround(out * 100.0f));
   }
 
+  int evaluateMiniQSearch(const std::vector<float>& input) const {
+    if (!enabled || input.empty()) return 0;
+    return evaluateDraft(input);
+  }
+
   void distillStrategicHint(float policyActivation, float valueActivation) {
     if (w1.empty() || b1.empty()) return;
     const float blend = (policyActivation * 0.2f) + (valueActivation * 0.8f);
@@ -853,6 +858,7 @@ struct Features {
   bool useAsync = false;
   bool useMultiRateThinking = true;
   bool usePolicyPruning = true;
+  bool usePolicyValuePruning = true;
   bool useLazyEval = true;
   int policyTopK = 5;
   float policyPruneThreshold = 0.90f;
@@ -940,6 +946,28 @@ struct Manager {
 }  // namespace timing
 
 namespace tooling {
+struct TrainingMetrics {
+  float currentLoss = 0.0f;
+  float eloGain = 0.0f;
+  int nodesPerSecond = 0;
+  std::array<char, 64> statusMsg{};
+};
+
+struct SharedMetricsIPC {
+  std::string path = "training.ipc";
+  TrainingMetrics last{};
+
+  bool write(const TrainingMetrics& metrics) {
+    last = metrics;
+    return true;
+  }
+};
+
+struct BinpackReader {
+  std::string path = "selfplay.binpack";
+  std::size_t estimatePositionThroughput() const { return 0; }
+};
+
 struct Formats {
   bool pgnEnabled = true;
   bool epdEnabled = true;

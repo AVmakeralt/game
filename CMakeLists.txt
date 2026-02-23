@@ -7,6 +7,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_executable(chess_engine
   main.cpp
+  board.cpp
+  movegen.cpp
+  tt.cpp
   eval.cpp
 )
 

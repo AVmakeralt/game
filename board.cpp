@@ -24,6 +24,11 @@ int Board::squareIndex(char file, char rank) {
   return (rank - '1') * 8 + (file - 'a');
 }
 
+char Board::pieceAt(int idx) const {
+  if (idx < 0 || idx >= 64) return '.';
+  return squares[static_cast<std::size_t>(idx)];
+}
+
 std::string Board::squareName(int sq) {
   if (sq < 0 || sq >= 64) return "-";
   return std::string{static_cast<char>('a' + sq % 8), static_cast<char>('1' + sq / 8)};

@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "board.h"
+
 namespace tt {
 
 enum class Bound : std::uint8_t { Exact = 0, Lower = 1, Upper = 2 };
@@ -52,6 +54,9 @@ struct Table {
     slot.generation = generation;
   }
 };
+
+void initializeZobrist();
+std::uint64_t hash(const board::Board& b);
 
 }  // namespace tt
 

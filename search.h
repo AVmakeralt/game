@@ -133,6 +133,8 @@ class Searcher {
   mutable bool strategyCached_ = false;
   mutable engine_components::eval_model::NNUE::Accumulator nnueAccumulator_{};
   engine_components::representation::TemporalBitboard temporal_{};
+  movegen::Move lastBestMove_{};
+  int lastIterationScore_ = 0;
 
   void assignCandidateDepths(Result& out, int candidateCount, int rootDepth) const {
     out.candidateDepths.assign(candidateCount, rootDepth);
@@ -285,6 +287,8 @@ class Searcher {
   }
 
   int alphaBeta(int depth, int alpha, int beta) {
+    const int alphaOrig = alpha;
+    const int betaOrig = beta;
     if (alpha > beta) {
       ++alphaBetaViolations_;
       std::swap(alpha, beta);
@@ -322,6 +326,12 @@ class Searcher {
     }
     int bounded = std::clamp(score, alpha, beta);
     if (tt_) {
+      std::uint64_t key = 1469598103934665603ULL;
+      for (char piece : boardSnapshot_.squares) {
+        key ^= static_cast<std::uint64_t>(static_cast<unsigned char>(piece));
+        key *= 1099511628211ULL;
+      }
+      key ^= boardSnapshot_.whiteToMove ? 0x9e3779b97f4a7c15ULL : 0ULL;
       tt::Bound bnd = tt::Bound::Exact;
       if (bounded <= alphaOrig) bnd = tt::Bound::Upper;
       else if (bounded >= betaOrig) bnd = tt::Bound::Lower;
