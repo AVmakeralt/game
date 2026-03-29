@@ -376,6 +376,12 @@ void handleGo(State& state, const std::string& cmd) {
     return;
   }
 
+  if (state.board.halfmoveClock >= 100) {
+    std::cout << "info string draw by rule\n";
+    std::cout << "bestmove 0000\n";
+    return;
+  }
+
   const std::string key = openingKey(state);
   const std::string bookMove = state.book.probe(key);
   if (!bookMove.empty()) {
@@ -441,6 +447,20 @@ void handleGo(State& state, const std::string& cmd) {
   state.prep.builder.addLine(key, result.bestMove.toUCI());
 }
 
+std::uint64_t perft(const board::Board& position, int depth) {
+  if (depth <= 0) return 1;
+  const auto moves = movegen::generateLegal(position);
+  if (depth == 1) return static_cast<std::uint64_t>(moves.size());
+
+  std::uint64_t nodes = 0;
+  for (const auto& mv : moves) {
+    board::Board child = position;
+    if (!child.applyMove(mv.from, mv.to, mv.promotion)) continue;
+    nodes += perft(child, depth - 1);
+  }
+  return nodes;
+}
+
 void runLoop(State& state) {
   std::string input;
   while (state.running && std::getline(std::cin, input)) {
@@ -456,9 +476,17 @@ void runLoop(State& state) {
       handleGo(state, input);
     } else if (input == "stop") {
       state.stopRequested = true;
-    } else if (input == "perft") {
-      state.perftNodes += movegen::generateLegal(state.board).size();
-      std::cout << "info string perft_nodes " << state.perftNodes << '\n';
+    } else if (input.rfind("perft", 0) == 0) {
+      std::istringstream iss(input);
+      std::string token;
+      int depth = 1;
+      iss >> token;
+      if (!(iss >> depth)) depth = 1;
+      depth = std::max(0, depth);
+      const std::uint64_t nodes = perft(state.board, depth);
+      state.perftNodes += nodes;
+      std::cout << "nodes " << nodes << '\n';
+      std::cout << "info string perft_accumulated " << state.perftNodes << '\n';
     } else if (input == "bench") {
       const auto pseudo = movegen::generatePseudoLegal(state.board).size();
       const auto legal = movegen::generateLegal(state.board).size();
