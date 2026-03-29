@@ -27,7 +27,7 @@ Supported:
 - `go movetime <ms>`
 - `stop`
 - `quit`
-- `perft <N>`
+- `perft <N>` (full legal-move node count at depth `N`, prints `nodes <count>`)
 
 ## Examples
 
@@ -57,4 +57,29 @@ Engine emits runtime instrumentation fields in `info` and `perft` output:
 ```bash
 ./tests/perft_regression.sh ./chess_engine
 ./tests/position_regression.sh ./chess_engine
+```
+
+## Python training assets (SmallNet / MegaNet)
+
+This repo now includes trainable Python models (no stubs):
+
+- `python/nets.py`
+  - `SmallNet`: compact residual policy/value net for faster iteration.
+  - `MegaNet`: deeper/wider residual policy/value net for stronger training runs.
+- `python/train.py`
+  - End-to-end training loop using `.npz` datasets (`planes`, `policy`, `value` arrays).
+- `python/opening_book.py`
+  - Generates opening books for both models in engine-compatible key format.
+
+Generate books:
+
+```bash
+python3 python/opening_book.py --out-dir books
+```
+
+Train either net:
+
+```bash
+python3 python/train.py --model small --train data/train.npz --valid data/valid.npz --out weights/small.pt
+python3 python/train.py --model mega --train data/train.npz --valid data/valid.npz --out weights/mega.pt
 ```

@@ -1,0 +1,22 @@
+{
+  "c2c4": "e7e5",
+  "c2c4_e7e5": "b1c3",
+  "c2c4_e7e5_b1c3": "g8f6",
+  "c2c4_e7e5_b1c3_g8f6": "g2g3",
+  "d2d4": "d7d5",
+  "d2d4_d7d5": "c2c4",
+  "d2d4_d7d5_c2c4": "e7e6",
+  "d2d4_d7d5_c2c4_e7e6": "b1c3",
+  "e2e4": "e7e5",
+  "e2e4_c7c5": "g1f3",
+  "e2e4_c7c5_g1f3": "d7d6",
+  "e2e4_c7c5_g1f3_d7d6": "d2d4",
+  "e2e4_e7e5": "g1f3",
+  "e2e4_e7e5_g1f3": "b8c6",
+  "e2e4_e7e5_g1f3_b8c6": "f1b5",
+  "g1f3": "d7d5",
+  "g1f3_d7d5": "g2g3",
+  "g1f3_d7d5_g2g3": "g8f6",
+  "g1f3_d7d5_g2g3_g8f6": "f1g2",
+  "startpos": "e2e4"
+}
