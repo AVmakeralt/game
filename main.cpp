@@ -109,9 +109,25 @@ std::string describeFeatures(const State& state) {
   out << "tooling[ramTB=" << state.ramTablebase.enabled
       << " ipcPath=" << state.tests.ipc.path
       << " binpack=" << state.tests.binpack.path
-      << " cat=" << state.training.cat.enabled << "]";
+      << " cat=" << state.training.cat.enabled
+      << " reviewer=" << state.training.reviewerEnabled
+      << " topics=" << state.training.practiceTopics.size() << "]";
 
   return out.str();
+}
+
+std::string joinTopics(const std::vector<std::string>& topics) {
+  if (topics.empty()) return "none";
+  std::ostringstream oss;
+  for (std::size_t i = 0; i < topics.size(); ++i) {
+    if (i) oss << ',';
+    oss << topics[i];
+  }
+  return oss.str();
+}
+
+bool startsWith(const std::string& text, const std::string& prefix) {
+  return text.size() >= prefix.size() && text.compare(0, prefix.size(), prefix) == 0;
 }
 
 std::string openingKey(const State& state) {
@@ -173,9 +189,9 @@ void initialize(State& state) {
   state.features.policyPruneThreshold = state.strategyNet.cfg.pruneThreshold;
   state.features.useLazyEval = true;
   state.features.masterEvalTopMoves = 3;
-  state.nnue.load("nnue.bin");
-  state.strategyNet.load("strategy_large.nn");
-  state.strategyNet.weightsPath = "meganet_lc0.nn";
+  state.nnue.load("eval.nnue");
+  state.strategyNet.load("meganet.lc0");
+  state.transformerCritic.load("chess_transformer_25m.pt");
   state.policy.priors = {0.70f, 0.20f, 0.10f};
   state.policy.name = "blitz net";
   state.ramTablebase.enabled = false;
@@ -220,6 +236,9 @@ void printUciId() {
   std::cout << "option name StrategyActiveExperts type spin default 2 min 1 max 2\n";
   std::cout << "option name UseRamTablebase type check default false\n";
   std::cout << "option name AntiCheat type check default false\n";
+  std::cout << "option name ReviewerEnabled type check default false\n";
+  std::cout << "option name ReviewerWeights type string default reviewer.nn\n";
+  std::cout << "option name TransformerWeights type string default chess_transformer_25m.pt\n";
   std::cout << "uciok\n";
 }
 
@@ -305,6 +324,12 @@ void handleSetOption(State& state, const std::string& cmd) {
     state.strategyNet.cfg.useHardPhaseSwitch = (value == "true");
   } else if (name == "StrategyActiveExperts") {
     state.strategyNet.cfg.activeExperts = std::clamp(std::stoi(value), 1, 2);
+  } else if (name == "ReviewerEnabled") {
+    state.training.reviewerEnabled = (value == "true");
+  } else if (name == "ReviewerWeights") {
+    state.training.registerReviewNetwork(value);
+  } else if (name == "TransformerWeights") {
+    state.transformerCritic.load(value);
   } else if (name == "UseRamTablebase") {
     state.ramTablebase.enabled = (value == "true");
     if (state.ramTablebase.enabled && !state.ramTablebase.loaded) state.ramTablebase.preload6ManMock();
@@ -438,6 +463,14 @@ void handleGo(State& state, const std::string& cmd) {
                             &state.handcrafted, &state.policy, &state.nnue, &state.strategyNet, &state.transformerCritic,
                             state.mcts, state.parallel, &state.tt);
   const search::Result result = searcher.think(state.board, limits, state.rng, &state.stopRequested);
+  movegen::Move safeBest = result.bestMove;
+  if (!movegen::isLegalMove(state.board, safeBest)) {
+    const auto legalFallback = movegen::generateLegal(state.board);
+    if (!legalFallback.empty()) {
+      safeBest = legalFallback.front();
+      std::cout << "info string repaired_illegal_bestmove true\n";
+    }
+  }
 
   bool novel = state.prep.novelty.isNovel(key);
   std::cout << "info depth " << result.depth << " nodes " << result.nodes << " score cp " << result.scoreCp << " pv";
@@ -454,14 +487,14 @@ void handleGo(State& state, const std::string& cmd) {
 
   std::cout << "info string eval_breakdown " << result.evalBreakdown << '\n';
 
-  std::cout << "bestmove " << result.bestMove.toUCI();
+  std::cout << "bestmove " << safeBest.toUCI();
   if (result.ponder.from >= 0) {
     std::cout << " ponder " << result.ponder.toUCI();
   }
   std::cout << '\n';
 
-  state.cache.put(key, result.bestMove.toUCI());
-  state.prep.builder.addLine(key, result.bestMove.toUCI());
+  state.cache.put(key, safeBest.toUCI());
+  state.prep.builder.addLine(key, safeBest.toUCI());
 }
 
 std::uint64_t perft(const board::Board& position, int depth) {
@@ -572,6 +605,29 @@ void runLoop(State& state) {
       std::cout << "info string explain " << state.handcrafted.breakdown() << '\n';
     } else if (input == "features") {
       std::cout << "info string features " << describeFeatures(state) << '\n';
+    } else if (input == "weights") {
+      std::cout << "info string weights nnue=" << state.nnue.weightsPath
+                << " strategy=" << state.strategyNet.weightsPath
+                << " transformer=" << state.transformerCritic.weightsPath
+                << " reviewer=" << state.training.reviewerWeightsPath
+                << " reviewer_enabled=" << (state.training.reviewerEnabled ? "true" : "false") << '\n';
+    } else if (startsWith(input, "reviewgame ")) {
+      if (!state.training.reviewerEnabled) {
+        std::cout << "info string reviewer disabled; enable via setoption name ReviewerEnabled value true\n";
+      } else {
+        const std::string gameRecord = input.substr(std::string("reviewgame ").size());
+        const auto topics = state.training.reviewGameAndSuggestPracticeTopics(gameRecord);
+        std::cout << "info string practice_topics " << joinTopics(topics)
+                  << " reviewer_weights=" << state.training.reviewerWeightsPath << '\n';
+      }
+    } else if (input == "practicetopics") {
+      std::cout << "info string practice_topics " << joinTopics(state.training.practiceTopics) << '\n';
+    } else if (startsWith(input, "islegal ")) {
+      const std::string moveText = input.substr(std::string("islegal ").size());
+      movegen::Move move;
+      const bool parsed = movegen::parseUCIMove(moveText, move);
+      const bool legal = parsed && movegen::isLegalMove(state.board, move);
+      std::cout << "info string legal " << (legal ? "true" : "false") << '\n';
     } else if (input == "quit") {
       state.running = false;
     } else if (!input.empty()) {
