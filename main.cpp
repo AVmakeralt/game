@@ -189,9 +189,9 @@ void initialize(State& state) {
   state.features.policyPruneThreshold = state.strategyNet.cfg.pruneThreshold;
   state.features.useLazyEval = true;
   state.features.masterEvalTopMoves = 3;
-  state.nnue.load("nnue.bin");
-  state.strategyNet.load("strategy_large.nn");
-  state.strategyNet.weightsPath = "meganet_lc0.nn";
+  state.nnue.load("eval.nnue");
+  state.strategyNet.load("meganet.lc0");
+  state.transformerCritic.load("chess_transformer_25m.pt");
   state.policy.priors = {0.70f, 0.20f, 0.10f};
   state.policy.name = "blitz net";
   state.ramTablebase.enabled = false;
