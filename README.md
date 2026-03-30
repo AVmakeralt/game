@@ -83,3 +83,16 @@ Train either net:
 python3 python/train.py --model small --train data/train.npz --valid data/valid.npz --out weights/small.pt
 python3 python/train.py --model mega --train data/train.npz --valid data/valid.npz --out weights/mega.pt
 ```
+
+## Engine dataset generation (binpack with search thinking)
+
+Every `go` search now appends one line to `selfplay.binpack` with:
+
+- position key + board snapshot
+- depth / score / nodes
+- `value_stm_cp` (label from side-to-move perspective) and `value_white_cp` (white perspective)
+- bestmove and PV
+- candidate depths
+- `thinking` payload (the engine `eval_breakdown` string)
+
+Use `binpackstats` in UCI mode to see how many records are currently stored.

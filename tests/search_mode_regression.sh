@@ -38,15 +38,17 @@ extract_root_mix() {
   echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
 }
 
-# Tactical/opening position should use UGDS at least once.
+# Tactical/opening position should use custom UGDS path and never fall back to classic mode.
 opening_out=$(cd "$ROOT_DIR" && printf 'position startpos\ngo depth 4\nquit\n' | "$ENGINE")
 read -r opening_ugds opening_classic < <(extract_root_mix "$opening_out")
 [[ "$opening_ugds" -gt 0 ]]
+[[ "$opening_classic" -eq 0 ]]
 
-# Quiet corner-king ending should prefer classic search path.
+# Quiet corner-king ending should also stay on the custom UGDS path only.
 endgame_out=$(cd "$ROOT_DIR" && printf 'position fen 7k/8/8/8/8/8/8/K7 w - - 0 1\ngo depth 4\nquit\n' | "$ENGINE")
 read -r endgame_ugds endgame_classic < <(extract_root_mix "$endgame_out")
-[[ "$endgame_classic" -gt 0 ]]
+[[ "$endgame_ugds" -gt 0 ]]
+[[ "$endgame_classic" -eq 0 ]]
 
 # Stress a few representative positions to ensure search does not crash.
 for fen in \
