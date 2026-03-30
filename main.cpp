@@ -189,9 +189,9 @@ void initialize(State& state) {
   state.features.policyPruneThreshold = state.strategyNet.cfg.pruneThreshold;
   state.features.useLazyEval = true;
   state.features.masterEvalTopMoves = 3;
-  state.nnue.load("nnue.bin");
-  state.strategyNet.load("strategy_large.nn");
-  state.strategyNet.weightsPath = "meganet_lc0.nn";
+  state.nnue.load("eval.nnue");
+  state.strategyNet.load("meganet.lc0");
+  state.transformerCritic.load("chess_transformer_25m.pt");
   state.policy.priors = {0.70f, 0.20f, 0.10f};
   state.policy.name = "blitz net";
   state.ramTablebase.enabled = false;
@@ -460,6 +460,14 @@ void handleGo(State& state, const std::string& cmd) {
                             &state.handcrafted, &state.policy, &state.nnue, &state.strategyNet, &state.transformerCritic,
                             state.mcts, state.parallel, &state.tt);
   const search::Result result = searcher.think(state.board, limits, state.rng, &state.stopRequested);
+  movegen::Move safeBest = result.bestMove;
+  if (!movegen::isLegalMove(state.board, safeBest)) {
+    const auto legalFallback = movegen::generateLegal(state.board);
+    if (!legalFallback.empty()) {
+      safeBest = legalFallback.front();
+      std::cout << "info string repaired_illegal_bestmove true\n";
+    }
+  }
 
   bool novel = state.prep.novelty.isNovel(key);
   std::cout << "info depth " << result.depth << " nodes " << result.nodes << " score cp " << result.scoreCp << " pv";
@@ -476,14 +484,14 @@ void handleGo(State& state, const std::string& cmd) {
 
   std::cout << "info string eval_breakdown " << result.evalBreakdown << '\n';
 
-  std::cout << "bestmove " << result.bestMove.toUCI();
+  std::cout << "bestmove " << safeBest.toUCI();
   if (result.ponder.from >= 0) {
     std::cout << " ponder " << result.ponder.toUCI();
   }
   std::cout << '\n';
 
-  state.cache.put(key, result.bestMove.toUCI());
-  state.prep.builder.addLine(key, result.bestMove.toUCI());
+  state.cache.put(key, safeBest.toUCI());
+  state.prep.builder.addLine(key, safeBest.toUCI());
 }
 
 std::uint64_t perft(const board::Board& position, int depth) {

@@ -71,7 +71,7 @@ class Searcher {
   Result think(const board::Board& b, const Limits& limits, std::mt19937& rng, bool* stopFlag) {
     Result out;
     boardSnapshot_ = b;
-    const auto moves = movegen::generatePseudoLegal(b);
+    const auto moves = movegen::generateLegal(b);
     nodeCounter_ = 0;
     strategyCadence_ = std::max(4, limits.depth * 2);
     strategyCached_ = false;
