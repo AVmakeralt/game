@@ -7,6 +7,7 @@
 #include <cmath>
 #include <future>
 #include <cctype>
+#include <mutex>
 #include <random>
 #include <numeric>
 #include <thread>
@@ -74,6 +75,8 @@ class Searcher {
     nodeCounter_ = 0;
     strategyCadence_ = std::max(4, limits.depth * 2);
     strategyCached_ = false;
+    ugdsIterations_ = 0;
+    classicIterations_ = 0;
     std::uint64_t occ = 0ULL;
     for (int sq = 0; sq < 64; ++sq) if (boardSnapshot_.squares[static_cast<std::size_t>(sq)] != '.') occ |= (1ULL << sq);
     temporal_.push(occ);
@@ -113,6 +116,8 @@ class Searcher {
     out.evalBreakdown += " tt_hits=" + std::to_string(ttHits_) + " tt_stores=" + std::to_string(ttStores_);
     out.evalBreakdown += " ab_violations=" + std::to_string(alphaBetaViolations_);
     out.evalBreakdown += " horizon_osc=" + std::to_string(horizonOscillations_);
+    out.evalBreakdown +=
+        " root_mix[ugds=" + std::to_string(ugdsIterations_) + ",classic=" + std::to_string(classicIterations_) + "]";
     return out;
   }
 
@@ -135,11 +140,14 @@ class Searcher {
   int ttHits_ = 0;
   int ttStores_ = 0;
   int horizonOscillations_ = 0;
+  int ugdsIterations_ = 0;
+  int classicIterations_ = 0;
   board::Board boardSnapshot_{};
   std::size_t nodeCounter_ = 0;
   int strategyCadence_ = 8;
   mutable engine_components::eval_model::StrategyOutput cachedStrategy_{};
   mutable bool strategyCached_ = false;
+  mutable std::mutex strategyMutex_{};
   mutable engine_components::eval_model::NNUE::Accumulator nnueAccumulator_{};
   engine_components::representation::TemporalBitboard temporal_{};
   movegen::Move lastBestMove_{};
@@ -246,9 +254,11 @@ class Searcher {
       }
       out.scoreCp = score;
       int bestScore = -300000;
-      if (features_.useUGDS) {
+      if (shouldUseUGDSForIteration(moves, depth)) {
+        ++ugdsIterations_;
         bestScore = runUGDSRootIteration(moves, depth, out.bestMove, rng);
       } else {
+        ++classicIterations_;
         std::vector<std::pair<int, movegen::Move>> ordered;
         ordered.reserve(moves.size());
         for (const auto& m : moves) {
@@ -320,6 +330,32 @@ class Searcher {
       uncertainty += meta.predictedError * 0.7f;
     }
     return std::clamp(uncertainty, 0.1f, 2.5f);
+  }
+
+  bool shouldUseUGDSForIteration(const std::vector<movegen::Move>& rootMoves, int depth) const {
+    if (!features_.useUGDS) return false;
+    if (rootMoves.size() <= 1) return false;
+
+    int tacticalCandidates = 0;
+    for (const auto& mv : rootMoves) {
+      const bool capture = boardSnapshot_.squares[static_cast<std::size_t>(mv.to)] != '.';
+      const bool promotion = mv.promotion != '\0';
+      const bool centralPush = (mv.to % 8 >= 2 && mv.to % 8 <= 5 && mv.to / 8 >= 2 && mv.to / 8 <= 5);
+      if (capture || promotion || centralPush) ++tacticalCandidates;
+    }
+    const float tacticalDensity = static_cast<float>(tacticalCandidates) / static_cast<float>(rootMoves.size());
+    const engine_components::eval_model::GamePhase phase = detectGamePhase();
+    const bool sharpByPhase = (phase == engine_components::eval_model::GamePhase::Opening && depth >= 2) ||
+                              (phase == engine_components::eval_model::GamePhase::Middlegame && depth >= 3);
+
+    float netThreat = 0.0f;
+    if (strategyNet_ && strategyNet_->enabled) {
+      const auto& out = getStrategyOutput(false);
+      netThreat = std::clamp(out.tacticalThreat[0] + out.tacticalThreat[1], 0.0f, 2.0f);
+    }
+
+    const bool sharpByContent = tacticalDensity >= 0.35f || netThreat >= 0.40f;
+    return sharpByPhase || sharpByContent;
   }
 
   float tacticalRiskEstimate(const movegen::Move& move) const {
@@ -552,6 +588,7 @@ class Searcher {
       }
     }
 
+    if (beta < alpha) beta = alpha;
     return std::clamp(standPat, alpha, beta);
   }
 
@@ -583,6 +620,7 @@ class Searcher {
 
   const engine_components::eval_model::StrategyOutput& getStrategyOutput(bool refresh) const {
     if (!strategyNet_ || !strategyNet_->enabled) return cachedStrategy_;
+    std::lock_guard<std::mutex> lock(strategyMutex_);
     if (!strategyCached_ || refresh) {
       cachedStrategy_ = evaluateStrategyNet();
       strategyCached_ = true;
@@ -611,8 +649,10 @@ class Searcher {
     }
     if (strategyNet_ && strategyNet_->enabled) {
       const auto& out = getStrategyOutput(false);
-      const std::size_t to = static_cast<std::size_t>(m.to % static_cast<int>(out.policy.size()));
-      if (!out.policy.empty()) bias += static_cast<int>(out.policy[to] * 20.0f);
+      if (!out.policy.empty()) {
+        const std::size_t to = static_cast<std::size_t>(m.to % static_cast<int>(out.policy.size()));
+        bias += static_cast<int>(out.policy[to] * 20.0f);
+      }
       bias += static_cast<int>((out.tacticalThreat[0] - out.tacticalThreat[1]) * 20.0f);
     }
     return bias;

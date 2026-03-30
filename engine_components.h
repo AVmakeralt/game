@@ -888,8 +888,42 @@ struct TrainingInfra {
   bool supervisedEnabled = false;
   bool distillationEnabled = false;
   std::string replayBufferPath = "replay.bin";
+  bool reviewerEnabled = false;
+  std::string reviewerWeightsPath = "reviewer.nn";
+  std::vector<std::string> practiceTopics;
   CATConfig cat;
   LossLearning lossLearning;
+
+  void registerReviewNetwork(const std::string& weightsPath) {
+    if (!weightsPath.empty()) reviewerWeightsPath = weightsPath;
+    reviewerEnabled = true;
+  }
+
+  std::vector<std::string> reviewGameAndSuggestPracticeTopics(const std::string& gameRecord) {
+    practiceTopics.clear();
+    if (!reviewerEnabled || gameRecord.empty()) return practiceTopics;
+
+    int moveCount = 0;
+    int captures = 0;
+    int checks = 0;
+    int promotions = 0;
+    std::istringstream iss(gameRecord);
+    std::string token;
+    while (iss >> token) {
+      if (token.find('.') != std::string::npos) continue;
+      ++moveCount;
+      captures += static_cast<int>(token.find('x') != std::string::npos);
+      checks += static_cast<int>(token.find('+') != std::string::npos || token.find('#') != std::string::npos);
+      promotions += static_cast<int>(token.find('=') != std::string::npos);
+    }
+
+    if (moveCount < 24) practiceTopics.push_back("opening-preparation");
+    if (captures >= std::max(2, moveCount / 6)) practiceTopics.push_back("tactics-and-calculation");
+    if (checks >= 2) practiceTopics.push_back("king-safety-defense");
+    if (promotions > 0 || moveCount > 70) practiceTopics.push_back("endgame-technique");
+    if (practiceTopics.empty()) practiceTopics.push_back("strategic-planning");
+    return practiceTopics;
+  }
 };
 }  // namespace eval_model
 
