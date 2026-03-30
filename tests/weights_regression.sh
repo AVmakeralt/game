@@ -12,9 +12,9 @@ if [[ ! -x "$ENGINE" ]]; then
   exit 1
 fi
 
-# Draw-by-fifty-move rule path should trigger immediately in go handling.
-out=$(printf 'position fen 7k/8/8/8/8/8/8/K7 w - - 100 1\ngo depth 2\nquit\n' | "$ENGINE")
-[[ "$out" == *"info string draw by rule"* ]]
-[[ "$out" == *"bestmove 0000"* ]]
+out=$(cd "$ROOT_DIR" && printf 'weights\nquit\n' | "$ENGINE")
+[[ "$out" == *"nnue=eval.nnue"* ]]
+[[ "$out" == *"strategy=meganet.lc0"* ]]
+[[ "$out" == *"transformer=chess_transformer_25m.pt"* ]]
 
-echo "position regression passed"
+echo "weights regression passed"
