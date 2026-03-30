@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ENGINE="${1:-./chess_engine}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENGINE="${1:-${ROOT_DIR}/chess_engine}"
+if [[ ! -x "$ENGINE" && -x "${ROOT_DIR}/build/chess_engine" ]]; then
+  ENGINE="${ROOT_DIR}/build/chess_engine"
+fi
+
+if [[ ! -x "$ENGINE" ]]; then
+  echo "engine executable not found: $ENGINE" >&2
+  exit 1
+fi
 
 run_perft() {
   local depth="$1"
