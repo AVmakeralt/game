@@ -48,6 +48,7 @@ struct State {
   engine_components::eval_model::NNUE nnue;
   engine_components::eval_model::StrategyNet strategyNet;
   engine_components::eval_model::PolicyNet policy;
+  engine_components::eval_model::TransformerCritic transformerCritic;
   engine_components::eval_model::TrainingInfra training;
 
   engine_components::opening::Book book;
@@ -67,7 +68,8 @@ void log(State& state, const std::string& msg) {
 
 std::string describeFeatures(const State& state) {
   std::ostringstream out;
-  out << "search[pvs=" << state.features.usePVS << " aspiration=" << state.features.useAspiration
+  out << "search[ugds=" << state.features.useUGDS
+      << " pvs=" << state.features.usePVS << " aspiration=" << state.features.useAspiration
       << " null=" << state.features.useNullMove << " lmr=" << state.features.useLMR
       << " qsearch=" << state.features.useQuiescence << " mcts=" << state.features.useMCTS
       << " policyPrune=" << state.features.usePolicyPruning
@@ -80,10 +82,16 @@ std::string describeFeatures(const State& state) {
       << " inputs=" << state.nnue.cfg.inputs << " h1=" << state.nnue.cfg.hidden1
       << " h2=" << state.nnue.cfg.hidden2 << "] ";
 
-  out << "strategy[enabled=" << state.strategyNet.enabled
+  out << "meganet[enabled=" << state.strategyNet.enabled
       << " policyOut=" << state.strategyNet.cfg.policyOutputs
       << " hardPhase=" << state.strategyNet.cfg.useHardPhaseSwitch
       << " experts=" << state.strategyNet.cfg.activeExperts << "] ";
+
+  out << "blitz[enabled=" << state.policy.enabled
+      << " params=" << state.policy.parameterCount() << "] ";
+
+  out << "transformer[enabled=" << state.transformerCritic.enabled
+      << " params=" << state.transformerCritic.parameterCount() << "] ";
 
   out << "m2cts[batch=" << state.mcts.miniBatchSize
       << " vloss=" << state.mcts.virtualLoss
@@ -167,7 +175,9 @@ void initialize(State& state) {
   state.features.masterEvalTopMoves = 3;
   state.nnue.load("nnue.bin");
   state.strategyNet.load("strategy_large.nn");
+  state.strategyNet.weightsPath = "meganet_lc0.nn";
   state.policy.priors = {0.70f, 0.20f, 0.10f};
+  state.policy.name = "blitz net";
   state.ramTablebase.enabled = false;
   state.cache.load(state.openingCachePath);
   state.logFile.open("engine.log", std::ios::app);
@@ -187,7 +197,9 @@ void printUciId() {
   std::cout << "option name MaxSplitMoves type spin default 6 min 1 max 32\n";
   std::cout << "option name DeterministicMode type check default false\n";
   std::cout << "option name MultiPV type spin default 1 min 1 max 32\n";
+  std::cout << "option name UseUGDS type check default true\n";
   std::cout << "option name UseNNUE type check default true\n";
+  std::cout << "option name UseTransformerCritic type check default true\n";
   std::cout << "option name UseMCTS type check default false\n";
   std::cout << "option name MCTSBatchSize type spin default 256 min 32 max 2048\n";
   std::cout << "option name MCTSVirtualLoss type string default 0.25\n";
@@ -247,8 +259,12 @@ void handleSetOption(State& state, const std::string& cmd) {
     state.parallel.deterministicMode = (value == "true");
   } else if (name == "MultiPV") {
     state.features.multiPV = std::max(1, std::stoi(value));
+  } else if (name == "UseUGDS") {
+    state.features.useUGDS = (value == "true");
   } else if (name == "UseNNUE") {
     state.nnue.enabled = (value == "true");
+  } else if (name == "UseTransformerCritic") {
+    state.transformerCritic.enabled = (value == "true");
   } else if (name == "UseMCTS") {
     state.mcts.enabled = (value == "true");
     state.features.useMCTS = state.mcts.enabled;
@@ -419,7 +435,8 @@ void handleGo(State& state, const std::string& cmd) {
   const search::Limits limits = parseGoLimits(state, cmd);
 
   search::Searcher searcher(state.features, &state.killer, &state.history, &state.counter, &state.pvTable, &state.see,
-                            &state.handcrafted, &state.policy, &state.nnue, &state.strategyNet, state.mcts, state.parallel, &state.tt);
+                            &state.handcrafted, &state.policy, &state.nnue, &state.strategyNet, &state.transformerCritic,
+                            state.mcts, state.parallel, &state.tt);
   const search::Result result = searcher.think(state.board, limits, state.rng, &state.stopRequested);
 
   bool novel = state.prep.novelty.isNovel(key);

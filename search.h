@@ -48,6 +48,7 @@ class Searcher {
            const engine_components::eval_model::PolicyNet* policy,
            const engine_components::eval_model::NNUE* nnue,
            const engine_components::eval_model::StrategyNet* strategyNet,
+           const engine_components::eval_model::TransformerCritic* transformerCritic,
            engine_components::search_arch::MCTSConfig mctsCfg,
            engine_components::search_arch::ParallelConfig parallelCfg,
            tt::Table* tt)
@@ -61,6 +62,7 @@ class Searcher {
         policy_(policy),
         nnue_(nnue),
         strategyNet_(strategyNet),
+        transformerCritic_(transformerCritic),
         mctsCfg_(mctsCfg),
         parallelCfg_(parallelCfg),
         tt_(tt) {}
@@ -100,7 +102,13 @@ class Searcher {
       out.evalBreakdown += " nnue=on(" + std::to_string(nnue_->parameterCount()) + ")";
     }
     if (strategyNet_ && strategyNet_->enabled) {
-      out.evalBreakdown += " strategy_nn=on(" + std::to_string(strategyNet_->parameterCount()) + ")";
+      out.evalBreakdown += " meganet_lc0=on(" + std::to_string(strategyNet_->parameterCount()) + ")";
+    }
+    if (policy_ && policy_->enabled) {
+      out.evalBreakdown += " blitz_net=on(" + std::to_string(policy_->parameterCount()) + ")";
+    }
+    if (transformerCritic_ && transformerCritic_->enabled) {
+      out.evalBreakdown += " transformer=on(" + std::to_string(transformerCritic_->parameterCount()) + ")";
     }
     out.evalBreakdown += " tt_hits=" + std::to_string(ttHits_) + " tt_stores=" + std::to_string(ttStores_);
     out.evalBreakdown += " ab_violations=" + std::to_string(alphaBetaViolations_);
@@ -119,6 +127,7 @@ class Searcher {
   const engine_components::eval_model::PolicyNet* policy_;
   const engine_components::eval_model::NNUE* nnue_;
   const engine_components::eval_model::StrategyNet* strategyNet_;
+  const engine_components::eval_model::TransformerCritic* transformerCritic_;
   engine_components::search_arch::MCTSConfig mctsCfg_{};
   engine_components::search_arch::ParallelConfig parallelCfg_{};
   tt::Table* tt_ = nullptr;
@@ -135,6 +144,18 @@ class Searcher {
   engine_components::representation::TemporalBitboard temporal_{};
   movegen::Move lastBestMove_{};
   int lastIterationScore_ = 0;
+  struct UGDSEdge {
+    movegen::Move move{};
+    float q = 0.0f;
+    float proof = 0.0f;
+    float belief = 0.0f;
+    float uncertainty = 1.0f;
+    float tacticalRisk = 0.0f;
+    float prior = 0.0f;
+    int visits = 0;
+    int lowerBound = -300000;
+    int upperBound = 300000;
+  };
 
   void assignCandidateDepths(Result& out, int candidateCount, int rootDepth) const {
     out.candidateDepths.assign(candidateCount, rootDepth);
@@ -224,52 +245,56 @@ class Searcher {
         beta = score + 50;
       }
       out.scoreCp = score;
-      std::vector<std::pair<int, movegen::Move>> ordered;
-      ordered.reserve(moves.size());
-      for (const auto& m : moves) {
-        ordered.push_back({moveOrderingBias(m, depth), m});
-      }
-      std::sort(ordered.begin(), ordered.end(), [](const auto& lhs, const auto& rhs) { return lhs.first > rhs.first; });
-      if (features_.usePolicyPruning) {
-        int keep = std::max(1, std::min(features_.policyTopK, static_cast<int>(ordered.size())));
-        if (strategyNet_ && strategyNet_->enabled) {
-          const auto& sOut = getStrategyOutput(false);
-          if (!sOut.policy.empty()) {
-            const float maxLogit = *std::max_element(sOut.policy.begin(), sOut.policy.end());
-            float sumExp = 0.0f;
-            for (float logit : sOut.policy) sumExp += std::exp(logit - maxLogit);
-            const float topProb = 1.0f / std::max(1e-6f, sumExp);
-            if (topProb >= features_.policyPruneThreshold) keep = 1;
+      int bestScore = -300000;
+      if (features_.useUGDS) {
+        bestScore = runUGDSRootIteration(moves, depth, out.bestMove, rng);
+      } else {
+        std::vector<std::pair<int, movegen::Move>> ordered;
+        ordered.reserve(moves.size());
+        for (const auto& m : moves) {
+          ordered.push_back({moveOrderingBias(m, depth), m});
+        }
+        std::sort(ordered.begin(), ordered.end(), [](const auto& lhs, const auto& rhs) { return lhs.first > rhs.first; });
+        if (features_.usePolicyPruning) {
+          int keep = std::max(1, std::min(features_.policyTopK, static_cast<int>(ordered.size())));
+          if (strategyNet_ && strategyNet_->enabled) {
+            const auto& sOut = getStrategyOutput(false);
+            if (!sOut.policy.empty()) {
+              const float maxLogit = *std::max_element(sOut.policy.begin(), sOut.policy.end());
+              float sumExp = 0.0f;
+              for (float logit : sOut.policy) sumExp += std::exp(logit - maxLogit);
+              const float topProb = 1.0f / std::max(1e-6f, sumExp);
+              if (topProb >= features_.policyPruneThreshold) keep = 1;
+            }
+          }
+          ordered.resize(static_cast<std::size_t>(keep));
+        }
+
+        std::vector<std::future<int>> scouts;
+        const int scoutCount = std::min(7, static_cast<int>(ordered.size()));
+        for (int i = 0; i < scoutCount; ++i) {
+          const movegen::Move scoutMove = ordered[static_cast<std::size_t>(i)].second;
+          scouts.push_back(std::async(std::launch::async, [this, scoutMove, depth]() {
+            return evaluateMoveLazy(scoutMove, depth + 1, true);
+          }));
+        }
+
+        out.bestMove = ordered.empty() ? moves[d(rng)] : ordered.front().second;
+        const int masterCount = std::max(1, std::min(features_.masterEvalTopMoves, static_cast<int>(ordered.size())));
+        for (std::size_t i = 0; i < ordered.size(); ++i) {
+          const bool useMaster = !features_.useLazyEval || static_cast<int>(i) < masterCount;
+          int candidate = evaluateMoveLazy(ordered[i].second, depth, useMaster);
+          if (i < scouts.size()) {
+            candidate = std::max(candidate, scouts[i].get());
+          }
+          if (candidate > bestScore) {
+            bestScore = candidate;
+            out.bestMove = ordered[i].second;
           }
         }
-        ordered.resize(static_cast<std::size_t>(keep));
       }
-
-
-      std::vector<std::future<int>> scouts;
-      const int scoutCount = std::min(7, static_cast<int>(ordered.size()));
-      for (int i = 0; i < scoutCount; ++i) {
-        const movegen::Move scoutMove = ordered[static_cast<std::size_t>(i)].second;
-        scouts.push_back(std::async(std::launch::async, [this, scoutMove, depth]() {
-          return evaluateMoveLazy(scoutMove, depth + 1, true);
-        }));
-      }
-
-      int bestScore = -300000;
-      out.bestMove = ordered.empty() ? moves[d(rng)] : ordered.front().second;
-      const int masterCount = std::max(1, std::min(features_.masterEvalTopMoves, static_cast<int>(ordered.size())));
-      for (std::size_t i = 0; i < ordered.size(); ++i) {
-        const bool useMaster = !features_.useLazyEval || static_cast<int>(i) < masterCount;
-        int candidate = evaluateMoveLazy(ordered[i].second, depth, useMaster);
-        if (i < scouts.size()) {
-          candidate = std::max(candidate, scouts[i].get());
-        }
-        if (candidate > bestScore) {
-          bestScore = candidate;
-          out.bestMove = ordered[i].second;
-        }
-      }
-      out.nodes += depth * 1000;
+      out.scoreCp = bestScore;
+      out.nodes += depth * 1000 + static_cast<long long>(moves.size()) * std::max(1, depth) * 8;
 
       if (out.bestMove.from == lastBestMove_.from && out.bestMove.to == lastBestMove_.to &&
           out.bestMove.promotion == lastBestMove_.promotion) {
@@ -284,6 +309,139 @@ class Searcher {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
       }
     }
+  }
+
+  float staticUncertaintyEstimate(int depth, int staticScore) const {
+    const float depthTerm = 1.0f / std::max(1, depth);
+    const float swing = std::min(1.0f, std::abs(staticScore - lastIterationScore_) / 300.0f);
+    float uncertainty = 0.25f + depthTerm + swing * 0.5f;
+    if (transformerCritic_ && transformerCritic_->enabled) {
+      const auto meta = transformerCritic_->evaluate(boardSnapshot_.squares, boardSnapshot_.whiteToMove, depth, staticScore);
+      uncertainty += meta.predictedError * 0.7f;
+    }
+    return std::clamp(uncertainty, 0.1f, 2.5f);
+  }
+
+  float tacticalRiskEstimate(const movegen::Move& move) const {
+    const bool capture = boardSnapshot_.squares[static_cast<std::size_t>(move.to)] != '.';
+    const bool promotion = move.promotion != '\0';
+    const bool central = (move.to % 8 >= 2 && move.to % 8 <= 5 && move.to / 8 >= 2 && move.to / 8 <= 5);
+    const int seeScore = see_ ? see_->estimate(move, &boardSnapshot_.squares) : 0;
+    float risk = 0.0f;
+    risk += capture ? 0.35f : 0.05f;
+    risk += promotion ? 0.45f : 0.0f;
+    risk += central ? 0.10f : 0.0f;
+    risk += std::clamp(std::abs(seeScore) / 500.0f, 0.0f, 0.40f);
+    if (strategyNet_ && strategyNet_->enabled) {
+      const auto& out = getStrategyOutput(false);
+      risk += std::clamp(out.tacticalThreat[0] + out.tacticalThreat[1], 0.0f, 1.0f) * 0.3f;
+    }
+    if (transformerCritic_ && transformerCritic_->enabled) {
+      const auto meta = transformerCritic_->evaluate(boardSnapshot_.squares, boardSnapshot_.whiteToMove, 4, 0);
+      risk += meta.tactical * 0.25f;
+    }
+    return std::clamp(risk, 0.0f, 1.0f);
+  }
+
+  float ugdsPriority(const UGDSEdge& edge) const {
+    constexpr float A = 70.0f;
+    constexpr float B = 55.0f;
+    constexpr float C = 35.0f;
+    const float uncertaintyBonus = std::sqrt(edge.uncertainty / static_cast<float>(1 + edge.visits));
+    const float priorBonus = edge.prior / static_cast<float>(1 + edge.visits);
+    return edge.q + A * uncertaintyBonus + B * edge.tacticalRisk + C * priorBonus;
+  }
+
+  int searchUGDSChild(const movegen::Move& move, int depth, float tacticalRisk, float* outBelief, float* outUncertainty) {
+    board::Undo undo;
+    if (!boardSnapshot_.makeMove(move.from, move.to, move.promotion, undo)) {
+      if (outBelief) *outBelief = -30000.0f;
+      if (outUncertainty) *outUncertainty = 2.5f;
+      return -30000;
+    }
+
+    std::uint64_t occ = 0ULL;
+    for (int sq = 0; sq < 64; ++sq) if (boardSnapshot_.squares[static_cast<std::size_t>(sq)] != '.') occ |= (1ULL << sq);
+    temporal_.push(occ);
+
+    const int beliefScore = evaluateMoveLazy(move, depth, true);
+    const int burstExtension = tacticalRisk > 0.65f ? 2 : 0;
+    const int proofDepth = std::max(1, depth - 1 + burstExtension);
+    const int proof = -alphaBeta(proofDepth, -30000, 30000);
+    boardSnapshot_.unmakeMove(move.from, move.to, move.promotion, undo);
+
+    const int mixed = static_cast<int>(proof * 0.75f + beliefScore * 0.25f);
+    if (outBelief) *outBelief = static_cast<float>(beliefScore);
+    if (outUncertainty) {
+      const float disagreement = std::min(2.0f, std::abs(proof - beliefScore) / 250.0f);
+      *outUncertainty = std::clamp(0.2f + disagreement, 0.1f, 2.5f);
+    }
+    return mixed;
+  }
+
+  int runUGDSRootIteration(const std::vector<movegen::Move>& rootMoves, int depth, movegen::Move& bestMove, std::mt19937& rng) {
+    std::vector<UGDSEdge> edges;
+    edges.reserve(rootMoves.size());
+    float priorSum = 0.0f;
+    for (const auto& mv : rootMoves) {
+      UGDSEdge edge;
+      edge.move = mv;
+      edge.belief = static_cast<float>(evaluateMoveLazy(mv, depth, false));
+      edge.proof = edge.belief;
+      edge.q = edge.belief;
+      edge.tacticalRisk = tacticalRiskEstimate(mv);
+      edge.uncertainty = staticUncertaintyEstimate(depth, static_cast<int>(edge.belief));
+      edge.prior = std::max(0.01f, static_cast<float>(moveOrderingBias(mv, depth) + 200.0f));
+      priorSum += edge.prior;
+      edges.push_back(edge);
+    }
+    for (auto& edge : edges) edge.prior /= std::max(1e-3f, priorSum);
+
+    const int iterations = std::max(static_cast<int>(edges.size()) * 3, std::min(mctsCfg_.miniBatchSize / 8, 128));
+    std::uniform_int_distribution<std::size_t> edgeDist(0, edges.size() - 1);
+
+    for (int i = 0; i < iterations; ++i) {
+      std::size_t pick = 0;
+      float bestPriority = -1e9f;
+      if (i < static_cast<int>(edges.size())) {
+        pick = static_cast<std::size_t>(i);
+      } else {
+        for (std::size_t idx = 0; idx < edges.size(); ++idx) {
+          const float p = ugdsPriority(edges[idx]);
+          if (p > bestPriority) {
+            bestPriority = p;
+            pick = idx;
+          }
+        }
+        if (edges[pick].uncertainty > 1.2f && (i % 5 == 0)) {
+          pick = edgeDist(rng);
+        }
+      }
+
+      auto& edge = edges[pick];
+      float belief = edge.belief;
+      float freshUncertainty = edge.uncertainty;
+      const int childScore = searchUGDSChild(edge.move, depth, edge.tacticalRisk, &belief, &freshUncertainty);
+      edge.visits += 1;
+      edge.proof = std::max(edge.proof, static_cast<float>(childScore));
+      edge.belief = (edge.belief * static_cast<float>(edge.visits - 1) + belief) / static_cast<float>(edge.visits);
+      edge.q = 0.70f * edge.proof + 0.30f * edge.belief;
+      edge.lowerBound = std::max(edge.lowerBound, childScore - 16);
+      edge.upperBound = std::min(edge.upperBound, childScore + 16);
+      edge.uncertainty = std::max(0.1f, (edge.uncertainty * 0.8f + freshUncertainty * 0.2f) * 0.92f);
+      edge.tacticalRisk = std::clamp(edge.tacticalRisk * 0.85f + tacticalRiskEstimate(edge.move) * 0.15f, 0.0f, 1.0f);
+    }
+
+    const auto bestIt = std::max_element(edges.begin(), edges.end(), [](const UGDSEdge& lhs, const UGDSEdge& rhs) {
+      if (lhs.q == rhs.q) return lhs.visits < rhs.visits;
+      return lhs.q < rhs.q;
+    });
+    if (bestIt == edges.end()) {
+      bestMove = rootMoves.front();
+      return 0;
+    }
+    bestMove = bestIt->move;
+    return static_cast<int>(bestIt->q);
   }
 
   int alphaBeta(int depth, int alpha, int beta) {
@@ -471,14 +629,27 @@ class Searcher {
   int evaluateMoveLazy(const movegen::Move& move, int depth, bool useMaster) const {
     int score = moveOrderingBias(move, depth);
     score += static_cast<int>(__builtin_popcountll(temporal_.velocityMask()) / 8);
+    float nnueWeight = 1.0f;
+    float megaWeight = 1.0f;
+    float blitzWeight = 1.0f;
+    if (transformerCritic_ && transformerCritic_->enabled) {
+      const auto meta = transformerCritic_->evaluate(boardSnapshot_.squares, boardSnapshot_.whiteToMove, depth, lastIterationScore_);
+      nnueWeight = meta.netWeights[0];
+      megaWeight = meta.netWeights[1];
+      blitzWeight = meta.netWeights[2];
+    }
     if (nnue_ && nnue_->enabled) {
-      if (useMaster) score += nnue_->evaluateFromAccumulator(nnueAccumulator_) / 24;
-      else score += nnue_->evaluateDraft(nnueAccumulator_.features) / 24;
+      if (useMaster) score += static_cast<int>(nnueWeight * (nnue_->evaluateFromAccumulator(nnueAccumulator_) / 24.0f));
+      else score += static_cast<int>(nnueWeight * (nnue_->evaluateDraft(nnueAccumulator_.features) / 24.0f));
     }
     if (strategyNet_ && strategyNet_->enabled && useMaster) {
       const auto& out = getStrategyOutput(false);
       const float wdlEdge = out.wdl[0] - out.wdl[2];
-      score += static_cast<int>(wdlEdge * 40.0f);
+      score += static_cast<int>(megaWeight * wdlEdge * 40.0f);
+    }
+    if (policy_ && policy_->enabled && !policy_->priors.empty()) {
+      const std::size_t idx = static_cast<std::size_t>((move.from * 13 + move.to * 7 + depth) % static_cast<int>(policy_->priors.size()));
+      score += static_cast<int>(blitzWeight * policy_->priors[idx] * 60.0f);
     }
     return score;
   }
