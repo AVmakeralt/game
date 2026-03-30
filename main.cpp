@@ -238,7 +238,6 @@ void printUciId() {
   std::cout << "option name AntiCheat type check default false\n";
   std::cout << "option name ReviewerEnabled type check default false\n";
   std::cout << "option name ReviewerWeights type string default reviewer.nn\n";
-  std::cout << "option name TransformerWeights type string default chess_transformer_25m.pt\n";
   std::cout << "uciok\n";
 }
 
@@ -328,8 +327,6 @@ void handleSetOption(State& state, const std::string& cmd) {
     state.training.reviewerEnabled = (value == "true");
   } else if (name == "ReviewerWeights") {
     state.training.registerReviewNetwork(value);
-  } else if (name == "TransformerWeights") {
-    state.transformerCritic.load(value);
   } else if (name == "UseRamTablebase") {
     state.ramTablebase.enabled = (value == "true");
     if (state.ramTablebase.enabled && !state.ramTablebase.loaded) state.ramTablebase.preload6ManMock();
@@ -600,7 +597,6 @@ void runLoop(State& state) {
     } else if (input == "weights") {
       std::cout << "info string weights nnue=" << state.nnue.weightsPath
                 << " strategy=" << state.strategyNet.weightsPath
-                << " transformer=" << state.transformerCritic.weightsPath
                 << " reviewer=" << state.training.reviewerWeightsPath
                 << " reviewer_enabled=" << (state.training.reviewerEnabled ? "true" : "false") << '\n';
     } else if (startsWith(input, "reviewgame ")) {
