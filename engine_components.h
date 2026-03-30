@@ -1058,7 +1058,24 @@ struct SharedMetricsIPC {
 
 struct BinpackReader {
   std::string path = "selfplay.binpack";
-  std::size_t estimatePositionThroughput() const { return 0; }
+
+  bool appendRecord(const std::string& record) const {
+    std::ofstream out(path, std::ios::app | std::ios::binary);
+    if (!out) return false;
+    out << record << '\n';
+    return static_cast<bool>(out);
+  }
+
+  std::size_t estimatePositionThroughput() const {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return 0;
+    std::size_t count = 0;
+    std::string line;
+    while (std::getline(in, line)) {
+      if (!line.empty()) ++count;
+    }
+    return count;
+  }
 };
 
 struct Formats {

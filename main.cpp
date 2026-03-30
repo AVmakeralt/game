@@ -68,10 +68,7 @@ void log(State& state, const std::string& msg) {
 
 std::string describeFeatures(const State& state) {
   std::ostringstream out;
-  out << "search[ugds=" << state.features.useUGDS
-      << " pvs=" << state.features.usePVS << " aspiration=" << state.features.useAspiration
-      << " null=" << state.features.useNullMove << " lmr=" << state.features.useLMR
-      << " qsearch=" << state.features.useQuiescence << " mcts=" << state.features.useMCTS
+  out << "search[custom_ugds_only=" << state.features.useUGDS
       << " policyPrune=" << state.features.usePolicyPruning
       << " pvPrune=" << state.features.usePolicyValuePruning
       << " lazy=" << state.features.useLazyEval
@@ -150,6 +147,39 @@ std::string openingKey(const State& state) {
   return oss.str();
 }
 
+std::string encodeSearchBinpackRecord(const State& state, const std::string& key, const search::Result& result,
+                                      const movegen::Move& bestMove, bool novel) {
+  std::ostringstream record;
+  const int valueStmCp = result.scoreCp;
+  const int valueWhiteCp = state.board.whiteToMove ? result.scoreCp : -result.scoreCp;
+  record << "BINPACK1";
+  record << "|key=" << key;
+  record << "|stm=" << (state.board.whiteToMove ? 'w' : 'b');
+  record << "|board=";
+  for (char sq : state.board.squares) record << sq;
+  record << "|depth=" << result.depth;
+  record << "|score_cp=" << result.scoreCp;
+  record << "|value_stm_cp=" << valueStmCp;
+  record << "|value_white_cp=" << valueWhiteCp;
+  record << "|nodes=" << result.nodes;
+  record << "|bestmove=" << bestMove.toUCI();
+  record << "|novelty=" << (novel ? 1 : 0);
+  record << "|pv=";
+  for (std::size_t i = 0; i < result.pv.size(); ++i) {
+    if (i) record << ',';
+    record << result.pv[i].toUCI();
+  }
+  record << "|candidate_depths=";
+  for (std::size_t i = 0; i < result.candidateDepths.size(); ++i) {
+    if (i) record << ',';
+    record << result.candidateDepths[i];
+  }
+  std::string thinking = result.evalBreakdown;
+  std::replace(thinking.begin(), thinking.end(), '|', '/');
+  record << "|thinking=" << thinking;
+  return record.str();
+}
+
 void initialize(State& state) {
   state.board.setStartPos();
   state.tt.initialize(64);
@@ -181,6 +211,18 @@ void initialize(State& state) {
 
   state.stopRequested = false;
   state.features.multiPV = 1;
+  state.features.useUGDS = true;
+  state.features.usePVS = false;
+  state.features.useAspiration = false;
+  state.features.useQuiescence = false;
+  state.features.useNullMove = false;
+  state.features.useLMR = false;
+  state.features.useFutility = false;
+  state.features.useMateDistancePruning = false;
+  state.features.useExtensions = false;
+  state.features.useMCTS = false;
+  state.features.useParallel = false;
+  state.features.useAsync = false;
   state.parallel.threads = 1;
   state.mcts.enabled = false;
   state.policy.enabled = true;
@@ -206,22 +248,9 @@ void printUciId() {
   std::cout << "id name GameChessEngineX\n";
   std::cout << "id author Codex\n";
   std::cout << "option name Hash type spin default 64 min 1 max 8192\n";
-  std::cout << "option name Threads type spin default 1 min 1 max 256\n";
-  std::cout << "option name UseParallelSearch type check default false\n";
-  std::cout << "option name SplitDepthLimit type spin default 8 min 1 max 32\n";
-  std::cout << "option name YBWCFirstMoveSerial type check default true\n";
-  std::cout << "option name MaxSplitMoves type spin default 6 min 1 max 32\n";
-  std::cout << "option name DeterministicMode type check default false\n";
   std::cout << "option name MultiPV type spin default 1 min 1 max 32\n";
-  std::cout << "option name UseUGDS type check default true\n";
   std::cout << "option name UseNNUE type check default true\n";
   std::cout << "option name UseTransformerCritic type check default true\n";
-  std::cout << "option name UseMCTS type check default false\n";
-  std::cout << "option name MCTSBatchSize type spin default 256 min 32 max 2048\n";
-  std::cout << "option name MCTSVirtualLoss type string default 0.25\n";
-  std::cout << "option name MCTSUsePhaseAware type check default true\n";
-  std::cout << "option name MCTSUseCladeSelection type check default true\n";
-  std::cout << "option name MCTSFpuReduction type string default 0.20\n";
   std::cout << "option name EnableCAT type check default true\n";
   std::cout << "option name UseStrategyNN type check default true\n";
   std::cout << "option name StrategyPolicyOutputs type spin default 4096 min 64 max 4096\n";
@@ -263,39 +292,12 @@ void handleSetOption(State& state, const std::string& cmd) {
   if (name == "Hash") {
     int mb = std::max(1, std::stoi(value));
     state.tt.initialize(static_cast<std::size_t>(mb));
-  } else if (name == "Threads") {
-    state.parallel.threads = std::max(1, std::stoi(value));
-  } else if (name == "UseParallelSearch") {
-    state.features.useParallel = (value == "true");
-  } else if (name == "SplitDepthLimit") {
-    state.parallel.splitDepthLimit = std::clamp(std::stoi(value), 1, 32);
-  } else if (name == "YBWCFirstMoveSerial") {
-    state.parallel.ybwcFirstMoveSerial = (value == "true");
-  } else if (name == "MaxSplitMoves") {
-    state.parallel.maxSplitMoves = std::clamp(std::stoi(value), 1, 32);
-  } else if (name == "DeterministicMode") {
-    state.parallel.deterministicMode = (value == "true");
   } else if (name == "MultiPV") {
     state.features.multiPV = std::max(1, std::stoi(value));
-  } else if (name == "UseUGDS") {
-    state.features.useUGDS = (value == "true");
   } else if (name == "UseNNUE") {
     state.nnue.enabled = (value == "true");
   } else if (name == "UseTransformerCritic") {
     state.transformerCritic.enabled = (value == "true");
-  } else if (name == "UseMCTS") {
-    state.mcts.enabled = (value == "true");
-    state.features.useMCTS = state.mcts.enabled;
-  } else if (name == "MCTSBatchSize") {
-    state.mcts.miniBatchSize = std::clamp(std::stoi(value), 32, 2048);
-  } else if (name == "MCTSVirtualLoss") {
-    state.mcts.virtualLoss = std::clamp(std::stof(value), 0.0f, 2.0f);
-  } else if (name == "MCTSUsePhaseAware") {
-    state.mcts.usePhaseAwareM2CTS = (value == "true");
-  } else if (name == "MCTSUseCladeSelection") {
-    state.mcts.useCladeSelection = (value == "true");
-  } else if (name == "MCTSFpuReduction") {
-    state.mcts.fpuReduction = std::clamp(std::stof(value), 0.0f, 1.0f);
   } else if (name == "EnableCAT") {
     state.training.cat.enabled = (value == "true");
   } else if (name == "UseStrategyNN") {
@@ -489,6 +491,10 @@ void handleGo(State& state, const std::string& cmd) {
     std::cout << " ponder " << result.ponder.toUCI();
   }
   std::cout << '\n';
+
+  const std::string binpackRecord = encodeSearchBinpackRecord(state, key, result, safeBest, novel);
+  const bool wroteBinpack = state.tests.binpack.appendRecord(binpackRecord);
+  std::cout << "info string binpack_append " << (wroteBinpack ? "ok" : "failed") << '\n';
 
   state.cache.put(key, safeBest.toUCI());
   state.prep.builder.addLine(key, safeBest.toUCI());

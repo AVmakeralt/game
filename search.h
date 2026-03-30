@@ -7,6 +7,7 @@
 #include <cmath>
 #include <future>
 #include <cctype>
+#include <limits>
 #include <mutex>
 #include <random>
 #include <numeric>
@@ -118,6 +119,7 @@ class Searcher {
     out.evalBreakdown += " horizon_osc=" + std::to_string(horizonOscillations_);
     out.evalBreakdown +=
         " root_mix[ugds=" + std::to_string(ugdsIterations_) + ",classic=" + std::to_string(classicIterations_) + "]";
+    out.evalBreakdown += " ars_probes=" + std::to_string(arsProbes_);
     return out;
   }
 
@@ -142,6 +144,7 @@ class Searcher {
   int horizonOscillations_ = 0;
   int ugdsIterations_ = 0;
   int classicIterations_ = 0;
+  int arsProbes_ = 0;
   board::Board boardSnapshot_{};
   std::size_t nodeCounter_ = 0;
   int strategyCadence_ = 8;
@@ -163,6 +166,9 @@ class Searcher {
     int visits = 0;
     int lowerBound = -300000;
     int upperBound = 300000;
+    float refutationStrength = 0.0f;
+    float refutationConfidence = 0.0f;
+    bool fragile = false;
   };
 
   void assignCandidateDepths(Result& out, int candidateCount, int rootDepth) const {
@@ -335,27 +341,8 @@ class Searcher {
   bool shouldUseUGDSForIteration(const std::vector<movegen::Move>& rootMoves, int depth) const {
     if (!features_.useUGDS) return false;
     if (rootMoves.size() <= 1) return false;
-
-    int tacticalCandidates = 0;
-    for (const auto& mv : rootMoves) {
-      const bool capture = boardSnapshot_.squares[static_cast<std::size_t>(mv.to)] != '.';
-      const bool promotion = mv.promotion != '\0';
-      const bool centralPush = (mv.to % 8 >= 2 && mv.to % 8 <= 5 && mv.to / 8 >= 2 && mv.to / 8 <= 5);
-      if (capture || promotion || centralPush) ++tacticalCandidates;
-    }
-    const float tacticalDensity = static_cast<float>(tacticalCandidates) / static_cast<float>(rootMoves.size());
-    const engine_components::eval_model::GamePhase phase = detectGamePhase();
-    const bool sharpByPhase = (phase == engine_components::eval_model::GamePhase::Opening && depth >= 2) ||
-                              (phase == engine_components::eval_model::GamePhase::Middlegame && depth >= 3);
-
-    float netThreat = 0.0f;
-    if (strategyNet_ && strategyNet_->enabled) {
-      const auto& out = getStrategyOutput(false);
-      netThreat = std::clamp(out.tacticalThreat[0] + out.tacticalThreat[1], 0.0f, 2.0f);
-    }
-
-    const bool sharpByContent = tacticalDensity >= 0.35f || netThreat >= 0.40f;
-    return sharpByPhase || sharpByContent;
+    (void)depth;
+    return true;
   }
 
   float tacticalRiskEstimate(const movegen::Move& move) const {
@@ -385,7 +372,106 @@ class Searcher {
     constexpr float C = 35.0f;
     const float uncertaintyBonus = std::sqrt(edge.uncertainty / static_cast<float>(1 + edge.visits));
     const float priorBonus = edge.prior / static_cast<float>(1 + edge.visits);
-    return edge.q + A * uncertaintyBonus + B * edge.tacticalRisk + C * priorBonus;
+    const float refutationPenalty = edge.refutationStrength * edge.refutationConfidence * 90.0f;
+    const float fragilityPenalty = edge.fragile ? 35.0f : 0.0f;
+    return edge.q + A * uncertaintyBonus + B * edge.tacticalRisk + C * priorBonus - refutationPenalty - fragilityPenalty;
+  }
+
+  float suspicionScore(const UGDSEdge& edge) const {
+    const float lowExplorationBias = 1.0f / static_cast<float>(1 + edge.visits);
+    return edge.belief + edge.prior - edge.uncertainty - (edge.tacticalRisk * 0.5f) + lowExplorationBias * 25.0f;
+  }
+
+  static float moveEntropy(const std::vector<UGDSEdge>& edges) {
+    if (edges.empty()) return 0.0f;
+    float maxQ = edges.front().q;
+    for (const auto& edge : edges) maxQ = std::max(maxQ, edge.q);
+    float sum = 0.0f;
+    std::vector<float> probs;
+    probs.reserve(edges.size());
+    for (const auto& edge : edges) {
+      const float w = std::exp((edge.q - maxQ) / 80.0f);
+      probs.push_back(w);
+      sum += w;
+    }
+    if (sum <= 1e-6f) return 0.0f;
+    float entropy = 0.0f;
+    for (float w : probs) {
+      const float p = w / sum;
+      entropy += (p > 1e-6f) ? -p * std::log(p) : 0.0f;
+    }
+    return entropy;
+  }
+
+  static void applyMoveEntropyRegulator(std::vector<UGDSEdge>& edges, int depth) {
+    if (edges.size() <= 1) return;
+    const float entropy = moveEntropy(edges);
+    const float lowEntropyThreshold = 0.55f;
+    const float highEntropyThreshold = 1.35f;
+    const int explorationDepthGate = 5;
+    const int stabilizationDepthGate = 7;
+
+    if (entropy < lowEntropyThreshold && depth < explorationDepthGate) {
+      for (auto& edge : edges) {
+        edge.uncertainty = std::clamp(edge.uncertainty + 0.25f, 0.1f, 2.5f);
+      }
+    } else if (entropy > highEntropyThreshold && depth >= stabilizationDepthGate) {
+      for (auto& edge : edges) {
+        edge.uncertainty = std::clamp(edge.uncertainty * 0.92f, 0.1f, 2.5f);
+      }
+    }
+  }
+
+  int runAdversarialRefutationProbe(const movegen::Move& move, int depth, float tacticalRisk, float* confidence) {
+    board::Undo firstUndo;
+    if (!boardSnapshot_.makeMove(move.from, move.to, move.promotion, firstUndo)) {
+      if (confidence) *confidence = 0.0f;
+      return -30000;
+    }
+
+    auto replies = movegen::generateLegal(boardSnapshot_);
+    if (replies.empty()) {
+      const int terminal = -alphaBeta(std::max(1, depth - 1), -30000, 30000);
+      boardSnapshot_.unmakeMove(move.from, move.to, move.promotion, firstUndo);
+      if (confidence) *confidence = 1.0f;
+      return terminal;
+    }
+
+    std::vector<std::pair<int, movegen::Move>> scoredReplies;
+    scoredReplies.reserve(replies.size());
+    for (const auto& reply : replies) {
+      int tacticalWeight = 0;
+      const bool capture = boardSnapshot_.squares[static_cast<std::size_t>(reply.to)] != '.';
+      tacticalWeight += capture ? 240 : 0;
+      tacticalWeight += (reply.promotion != '\0') ? 160 : 0;
+      tacticalWeight += (reply.to % 8 >= 2 && reply.to % 8 <= 5 && reply.to / 8 >= 2 && reply.to / 8 <= 5) ? 90 : 0;
+      tacticalWeight += see_ ? std::max(0, see_->estimate(reply, &boardSnapshot_.squares)) : 0;
+      scoredReplies.push_back({tacticalWeight, reply});
+    }
+    std::sort(scoredReplies.begin(), scoredReplies.end(), [](const auto& lhs, const auto& rhs) {
+      return lhs.first > rhs.first;
+    });
+
+    const int probeCount = std::min<int>(2, static_cast<int>(scoredReplies.size()));
+    int worstForUs = std::numeric_limits<int>::max();
+    for (int i = 0; i < probeCount; ++i) {
+      const movegen::Move& reply = scoredReplies[static_cast<std::size_t>(i)].second;
+      board::Undo replyUndo;
+      if (!boardSnapshot_.makeMove(reply.from, reply.to, reply.promotion, replyUndo)) continue;
+      const int tactical = -evaluateMoveLazy(reply, std::max(1, depth - 2), true);
+      const int pessimism = static_cast<int>(40.0f + tacticalRisk * 35.0f);
+      const int rootPerspective = -(tactical + pessimism);
+      worstForUs = std::min(worstForUs, rootPerspective);
+      boardSnapshot_.unmakeMove(reply.from, reply.to, reply.promotion, replyUndo);
+    }
+
+    boardSnapshot_.unmakeMove(move.from, move.to, move.promotion, firstUndo);
+    if (confidence) {
+      const float depthConfidence = std::min(1.0f, static_cast<float>(std::max(1, depth)) / 8.0f);
+      const float breadthConfidence = std::min(1.0f, static_cast<float>(probeCount) / 4.0f);
+      *confidence = 0.45f + depthConfidence * 0.35f + breadthConfidence * 0.20f;
+    }
+    return worstForUs == std::numeric_limits<int>::max() ? -30000 : worstForUs;
   }
 
   int searchUGDSChild(const movegen::Move& move, int depth, float tacticalRisk, float* outBelief, float* outUncertainty) {
@@ -435,6 +521,7 @@ class Searcher {
 
     const int iterations = std::max(static_cast<int>(edges.size()) * 3, std::min(mctsCfg_.miniBatchSize / 8, 128));
     std::uniform_int_distribution<std::size_t> edgeDist(0, edges.size() - 1);
+    applyMoveEntropyRegulator(edges, depth);
 
     for (int i = 0; i < iterations; ++i) {
       std::size_t pick = 0;
@@ -466,6 +553,23 @@ class Searcher {
       edge.upperBound = std::min(edge.upperBound, childScore + 16);
       edge.uncertainty = std::max(0.1f, (edge.uncertainty * 0.8f + freshUncertainty * 0.2f) * 0.92f);
       edge.tacticalRisk = std::clamp(edge.tacticalRisk * 0.85f + tacticalRiskEstimate(edge.move) * 0.15f, 0.0f, 1.0f);
+
+      const float suspicion = suspicionScore(edge);
+      const bool paranoidTrigger = edge.tacticalRisk > 0.65f || std::abs(static_cast<int>(edge.q - edge.belief)) > 140;
+      if ((suspicion > 40.0f || paranoidTrigger) && depth >= 2 && i == 0 && edge.visits <= 2) {
+        float refuteConfidence = 0.0f;
+        const int refutedScore = runAdversarialRefutationProbe(edge.move, depth, edge.tacticalRisk, &refuteConfidence);
+        ++arsProbes_;
+        const float delta = std::max(0.0f, edge.q - static_cast<float>(refutedScore));
+        const float normalized = std::clamp(delta / 220.0f, 0.0f, 2.0f);
+        edge.refutationStrength = std::max(edge.refutationStrength * 0.65f, normalized);
+        edge.refutationConfidence = std::max(edge.refutationConfidence * 0.6f, refuteConfidence);
+        edge.belief -= edge.refutationStrength * 28.0f;
+        edge.uncertainty = std::clamp(edge.uncertainty + edge.refutationStrength * 0.22f, 0.1f, 2.5f);
+        edge.tacticalRisk = std::clamp(edge.tacticalRisk + edge.refutationStrength * 0.18f, 0.0f, 1.0f);
+        edge.q = 0.70f * edge.proof + 0.30f * edge.belief;
+        edge.fragile = edge.refutationStrength * edge.refutationConfidence > 0.85f;
+      }
     }
 
     const auto bestIt = std::max_element(edges.begin(), edges.end(), [](const UGDSEdge& lhs, const UGDSEdge& rhs) {
