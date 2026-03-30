@@ -814,7 +814,58 @@ struct StrategyNet {
 
 struct PolicyNet {
   bool enabled = false;
+  std::string name = "blitz net";
   std::vector<float> priors;
+
+  std::size_t parameterCount() const {
+    const std::size_t width = std::max<std::size_t>(64, priors.size());
+    return width * 512ULL + 512ULL;
+  }
+};
+
+struct TransformerCritic {
+  bool enabled = true;
+  std::string name = "meta transformer";
+  std::size_t parameterCount() const { return 10000000ULL; }
+
+  struct Output {
+    float predictedError = 0.0f;
+    float tactical = 0.0f;
+    float closedness = 0.0f;
+    std::array<float, 3> netWeights{{0.50f, 0.30f, 0.20f}};  // nnue, meganet, blitz
+  };
+
+  Output evaluate(const std::array<char, 64>& squares, bool whiteToMove, int depthHint, int staticEvalCp) const {
+    Output out{};
+    int whitePawns = 0;
+    int blackPawns = 0;
+    int queens = 0;
+    int occupied = 0;
+    for (char sq : squares) {
+      if (sq == '.') continue;
+      ++occupied;
+      const char p = static_cast<char>(std::tolower(static_cast<unsigned char>(sq)));
+      if (p == 'p') {
+        if (std::isupper(static_cast<unsigned char>(sq))) ++whitePawns;
+        else ++blackPawns;
+      }
+      if (p == 'q') ++queens;
+    }
+
+    const float density = occupied / 32.0f;
+    const float pawnWall = std::min(1.0f, (whitePawns + blackPawns) / 16.0f);
+    const float imbalance = std::min(1.0f, std::abs(staticEvalCp) / 500.0f);
+    out.closedness = std::clamp(0.65f * pawnWall + 0.35f * density, 0.0f, 1.0f);
+    out.tactical = std::clamp((queens > 0 ? 0.45f : 0.15f) + (1.0f - out.closedness) * 0.40f, 0.0f, 1.0f);
+    out.predictedError = std::clamp(0.15f + out.tactical * 0.50f + imbalance * 0.35f + 0.25f / std::max(1, depthHint), 0.05f, 1.5f);
+
+    float nnueWeight = 0.60f + (whiteToMove ? 0.03f : 0.0f) - out.predictedError * 0.12f;
+    float megaWeight = 0.25f + out.tactical * 0.35f + out.predictedError * 0.10f;
+    float blitzWeight = 0.15f + 0.20f / std::max(1, depthHint);
+    float sum = std::max(1e-5f, nnueWeight + megaWeight + blitzWeight);
+    out.netWeights = {nnueWeight / sum, megaWeight / sum, blitzWeight / sum};
+    return out;
+  }
 };
 
 struct CATConfig {
@@ -844,6 +895,7 @@ struct TrainingInfra {
 
 namespace search_arch {
 struct Features {
+  bool useUGDS = true;
   bool usePVS = true;
   bool useAspiration = true;
   bool useQuiescence = true;
