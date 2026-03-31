@@ -241,6 +241,17 @@ class Searcher {
            b.history[n - 3] == b.history[n - 7] && b.history[n - 4] == b.history[n - 8];
   }
 
+  static bool parseHistoryMove(const board::Board& b, std::size_t pliesBack, movegen::Move* out) {
+    if (!out) return false;
+    if (b.history.size() <= pliesBack) return false;
+    const std::string& token = b.history[b.history.size() - 1 - pliesBack];
+    return movegen::parseUCIMove(token, *out);
+  }
+
+  static bool isImmediateBacktrack(const movegen::Move& candidate, const movegen::Move& previous) {
+    return candidate.from == previous.to && candidate.to == previous.from && candidate.promotion == previous.promotion;
+  }
+
   int cladeId(const movegen::Move& m) const {
     const int df = std::abs((m.to % 8) - (m.from % 8));
     const int dr = std::abs((m.to / 8) - (m.from / 8));
@@ -314,7 +325,8 @@ class Searcher {
         }
 
         std::vector<std::future<int>> scouts;
-        const int scoutCount = std::min(7, static_cast<int>(ordered.size()));
+        const int scoutCount = features_.useAsync ? std::min(7, static_cast<int>(ordered.size())) : 0;
+        scouts.reserve(static_cast<std::size_t>(scoutCount));
         for (int i = 0; i < scoutCount; ++i) {
           const movegen::Move scoutMove = ordered[static_cast<std::size_t>(i)].second;
           scouts.push_back(std::async(std::launch::async, [this, scoutMove, depth]() {
@@ -705,20 +717,12 @@ class Searcher {
       const auto& out = getStrategyOutput(false);
       const float tacticalPressure = (out.tacticalThreat[0] + out.tacticalThreat[1]);
       if (tacticalPressure < 0.05f) {
-        best = std::min(best, beta - 2);  // soft quiescence pruning
-      }
-    }
-
-    if (strategyNet_ && strategyNet_->enabled) {
-      const auto& out = getStrategyOutput(false);
-      const float tacticalPressure = (out.tacticalThreat[0] + out.tacticalThreat[1]);
-      if (tacticalPressure < 0.05f) {
         beta -= 2;  // soft quiescence pruning when no tactical pressure is predicted
       }
     }
 
     if (beta < alpha) beta = alpha;
-    return std::clamp(standPat, alpha, beta);
+    return std::clamp(best, alpha, beta);
   }
 
 
@@ -773,11 +777,26 @@ class Searcher {
     int bias = 0;
     const char victim = boardSnapshot_.squares[static_cast<std::size_t>(m.to)];
     const char attacker = boardSnapshot_.squares[static_cast<std::size_t>(m.from)];
+    const bool isCapture = victim != '.';
+    const bool isQuiet = !isCapture && m.promotion == '\0';
     if (victim != '.') {
       const int mvvLva = pieceValue(victim) - pieceValue(attacker) / 16;
       bias += 220 + mvvLva / 4;
     }
     if (m.promotion != '\0') bias += 260;
+
+    movegen::Move last{};
+    if (isQuiet && parseHistoryMove(boardSnapshot_, 0, &last) && isImmediateBacktrack(m, last)) {
+      bias -= 4000;  // hard anti-shuffle penalty; only allow if truly forced.
+    }
+    movegen::Move twoPliesBack{};
+    if (isQuiet && parseHistoryMove(boardSnapshot_, 2, &twoPliesBack) &&
+        m.from == twoPliesBack.from && m.to == twoPliesBack.to && m.promotion == twoPliesBack.promotion) {
+      bias -= 2800;  // suppress classic two-ply repetition loops.
+    }
+    if (isQuiet && isLikelyRepetition(boardSnapshot_)) {
+      bias -= 1200;  // add draw-avoidance pressure once oscillation is detected.
+    }
 
     if (history_) bias += history_->score[m.from][m.to] * 4;
     if (killer_ && ply < static_cast<int>(killer_->killer.size())) {
@@ -856,6 +875,14 @@ class Searcher {
   }
 
   void updateHeuristics(int ply, const movegen::Move& best) {
+    movegen::Move last{};
+    movegen::Move twoPliesBack{};
+    const bool immediateBacktrack = parseHistoryMove(boardSnapshot_, 0, &last) && isImmediateBacktrack(best, last);
+    const bool twoPlyLoop = parseHistoryMove(boardSnapshot_, 2, &twoPliesBack) &&
+                            best.from == twoPliesBack.from && best.to == twoPliesBack.to &&
+                            best.promotion == twoPliesBack.promotion;
+    const bool repetitive = immediateBacktrack || twoPlyLoop;
+
     if (killer_ && ply < static_cast<int>(killer_->killer.size())) {
       killer_->killer[ply][1] = killer_->killer[ply][0];
       killer_->killer[ply][0] = best;
@@ -868,7 +895,8 @@ class Searcher {
           history_->score[from][to] -= std::clamp(history_->score[from][to] / 64, -1, 1);
         }
       }
-      history_->score[best.from][best.to] += 4;
+      if (!repetitive) history_->score[best.from][best.to] += 4;
+      else history_->score[best.from][best.to] -= 8;
     }
     if (counter_ && best.from >= 0 && best.from < 64 && best.to >= 0 && best.to < 64) {
       counter_->counter[best.from][best.to] = best;
