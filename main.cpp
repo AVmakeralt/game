@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cstdio>
 #include <fstream>
+#include <filesystem>
 #include <numeric>
 #include <iostream>
 #include <random>
@@ -129,6 +130,32 @@ std::string joinTopics(const std::vector<std::string>& topics) {
 
 bool startsWith(const std::string& text, const std::string& prefix) {
   return text.size() >= prefix.size() && text.compare(0, prefix.size(), prefix) == 0;
+}
+
+constexpr const char* kDefaultStrategyWeights = "meganet.lc0";
+
+std::string resolveDefaultNNUEWeightsPath() {
+  namespace fs = std::filesystem;
+  constexpr const char* kPreferred = "eval.nnue";
+
+  std::error_code ec;
+  if (fs::is_regular_file(kPreferred, ec)) return kPreferred;
+
+  const fs::path cwd = fs::current_path(ec);
+  if (ec) return kPreferred;
+
+  std::string fallback;
+  for (const auto& entry : fs::directory_iterator(cwd, ec)) {
+    if (ec || !entry.is_regular_file()) continue;
+
+    const fs::path candidate = entry.path().filename();
+    if (candidate.extension() != ".nnue") continue;
+
+    const std::string name = candidate.string();
+    if (startsWith(name, "nn-")) return name;
+    if (fallback.empty()) fallback = name;
+  }
+  return fallback.empty() ? kPreferred : fallback;
 }
 
 std::string openingKey(const State& state) {
@@ -362,8 +389,8 @@ void initialize(State& state) {
   state.features.policyPruneThreshold = state.strategyNet.cfg.pruneThreshold;
   state.features.useLazyEval = true;
   state.features.masterEvalTopMoves = 3;
-  state.nnue.load("eval.nnue");
-  state.strategyNet.load("meganet.lc0");
+  state.nnue.load(resolveDefaultNNUEWeightsPath());
+  state.strategyNet.load(kDefaultStrategyWeights);
   state.transformerCritic.load("chess_transformer_25m.pt");
   state.policy.priors = {0.70f, 0.20f, 0.10f};
   state.policy.name = "blitz net";
@@ -555,6 +582,35 @@ search::Limits parseGoLimits(State& state, const std::string& cmd) {
   return limits;
 }
 
+void tuneMoveTimeForPosition(State& state, const MaterialProfile& profile, bool tactical, search::Limits& limits) {
+  constexpr int kLowLegalCount = 8;
+  constexpr int kHighLegalCount = 35;
+  constexpr int kEndgamePieceCount = 10;
+  constexpr int kTacticalNum = 5, kTacticalDen = 4;      // 1.25x
+  constexpr int kLowLegalNum = 3, kLowLegalDen = 2;      // 1.50x
+  constexpr int kHighLegalNum = 17, kHighLegalDen = 20;  // 0.85x
+  constexpr int kEndgameNum = 7, kEndgameDen = 5;        // 1.40x
+  constexpr int kRemainingCapDivisor = 5;
+  constexpr int kIncrementCapMultiplier = 2;
+
+  if (limits.movetimeMs <= 0 || limits.infinite) return;
+
+  int tuned = limits.movetimeMs;
+  const int legalCount = static_cast<int>(movegen::generateLegal(state.board).size());
+
+  if (tactical) tuned = tuned * kTacticalNum / kTacticalDen;
+  if (legalCount <= kLowLegalCount) tuned = tuned * kLowLegalNum / kLowLegalDen;
+  else if (legalCount >= kHighLegalCount) tuned = tuned * kHighLegalNum / kHighLegalDen;
+  if (profile.pieceCount <= kEndgamePieceCount) tuned = tuned * kEndgameNum / kEndgameDen;
+
+  if (state.timeManager.remainingMs > 0) {
+    const int cap = std::max(1, state.timeManager.remainingMs / kRemainingCapDivisor +
+                                    state.timeManager.incrementMs * kIncrementCapMultiplier);
+    tuned = std::min(tuned, cap);
+  }
+  limits.movetimeMs = std::max(1, tuned);
+}
+
 void handleGo(State& state, const std::string& cmd) {
   if (!state.integrity.verifyRuntime()) {
     std::cout << "info string integrity-check-failed\n";
@@ -601,8 +657,9 @@ void handleGo(State& state, const std::string& cmd) {
   }
 
   state.stopRequested = false;
-  const search::Limits limits = parseGoLimits(state, cmd);
+  search::Limits limits = parseGoLimits(state, cmd);
   const bool tactical = isTacticalPosition(state);
+  tuneMoveTimeForPosition(state, profile, tactical, limits);
   if (state.syzygy.enabled) {
     SyzygyProbeResult syz;
     if (probeSyzygy(state, limits, syz)) {
@@ -614,7 +671,8 @@ void handleGo(State& state, const std::string& cmd) {
       }
     }
   }
-  const bool forceAlphaBeta = state.adaptiveSwitching && (profile.pieceCount <= 12 || tactical);
+  constexpr int kForceAlphaBetaPieceCount = 12;
+  const bool forceAlphaBeta = state.adaptiveSwitching && (profile.pieceCount <= kForceAlphaBetaPieceCount || tactical);
   const bool allowMcts = state.features.useMCTS && !forceAlphaBeta;
 
   auto searchFeatures = state.features;
@@ -703,10 +761,8 @@ void runLoop(State& state) {
       std::cout << "nodes " << nodes << '\n';
       std::cout << "info string perft_accumulated " << state.perftNodes << '\n';
     } else if (input == "bench") {
-      const auto pseudo = movegen::generatePseudoLegal(state.board).size();
       const auto legal = movegen::generateLegal(state.board).size();
-      std::cout << "info string bench movegen_pseudo=" << pseudo
-                << " movegen_legal=" << legal
+      std::cout << "info string bench movegen_legal=" << legal
                 << " nnue_params=" << state.nnue.parameterCount()
                 << " strategy_params=" << state.strategyNet.parameterCount()
                 << " tt_entries=" << state.tt.entries.size()

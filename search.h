@@ -171,6 +171,33 @@ class Searcher {
     bool fragile = false;
   };
 
+  // Reproducible search-control constants (kept centralized to avoid magic numbers).
+  static constexpr float kUncertaintyBase = 0.25f;
+  static constexpr float kUncertaintySwingScale = 0.5f;
+  static constexpr float kUncertaintyMin = 0.1f;
+  static constexpr float kUncertaintyMax = 2.5f;
+  static constexpr float kTransformerErrorScale = 0.7f;
+
+  static constexpr float kRiskQuietBase = 0.05f;
+  static constexpr float kRiskCaptureBonus = 0.35f;
+  static constexpr float kRiskPromotionBonus = 0.45f;
+  static constexpr float kRiskCentralBonus = 0.10f;
+  static constexpr float kRiskSEEDivisor = 500.0f;
+  static constexpr float kRiskSEECap = 0.40f;
+  static constexpr float kRiskStrategyScale = 0.3f;
+  static constexpr float kRiskTransformerScale = 0.25f;
+  static constexpr float kRiskMin = 0.0f;
+  static constexpr float kRiskMax = 1.0f;
+
+  static constexpr float kUGDSPriorityUncertaintyCoeff = 70.0f;
+  static constexpr float kUGDSPriorityRiskCoeff = 55.0f;
+  static constexpr float kUGDSPriorityPriorCoeff = 35.0f;
+  static constexpr float kUGDSPriorityRefutationPenalty = 90.0f;
+  static constexpr float kUGDSPriorityFragilePenalty = 35.0f;
+
+  static constexpr int kDivergenceDampHalfThreshold = 120;
+  static constexpr int kDivergenceDampThirdThreshold = 180;
+
   void assignCandidateDepths(Result& out, int candidateCount, int rootDepth) const {
     out.candidateDepths.assign(candidateCount, rootDepth);
     if (!features_.useMultiRateThinking || candidateCount <= 1) {
@@ -330,12 +357,12 @@ class Searcher {
   float staticUncertaintyEstimate(int depth, int staticScore) const {
     const float depthTerm = 1.0f / std::max(1, depth);
     const float swing = std::min(1.0f, std::abs(staticScore - lastIterationScore_) / 300.0f);
-    float uncertainty = 0.25f + depthTerm + swing * 0.5f;
+    float uncertainty = kUncertaintyBase + depthTerm + swing * kUncertaintySwingScale;
     if (transformerCritic_ && transformerCritic_->enabled) {
       const auto meta = transformerCritic_->evaluate(boardSnapshot_.squares, boardSnapshot_.whiteToMove, depth, staticScore);
-      uncertainty += meta.predictedError * 0.7f;
+      uncertainty += meta.predictedError * kTransformerErrorScale;
     }
-    return std::clamp(uncertainty, 0.1f, 2.5f);
+    return std::clamp(uncertainty, kUncertaintyMin, kUncertaintyMax);
   }
 
   bool shouldUseUGDSForIteration(const std::vector<movegen::Move>& rootMoves, int depth) const {
@@ -351,30 +378,28 @@ class Searcher {
     const bool central = (move.to % 8 >= 2 && move.to % 8 <= 5 && move.to / 8 >= 2 && move.to / 8 <= 5);
     const int seeScore = see_ ? see_->estimate(move, &boardSnapshot_.squares) : 0;
     float risk = 0.0f;
-    risk += capture ? 0.35f : 0.05f;
-    risk += promotion ? 0.45f : 0.0f;
-    risk += central ? 0.10f : 0.0f;
-    risk += std::clamp(std::abs(seeScore) / 500.0f, 0.0f, 0.40f);
+    risk += capture ? kRiskCaptureBonus : kRiskQuietBase;
+    risk += promotion ? kRiskPromotionBonus : 0.0f;
+    risk += central ? kRiskCentralBonus : 0.0f;
+    risk += std::clamp(std::abs(seeScore) / kRiskSEEDivisor, kRiskMin, kRiskSEECap);
     if (strategyNet_ && strategyNet_->enabled) {
       const auto& out = getStrategyOutput(false);
-      risk += std::clamp(out.tacticalThreat[0] + out.tacticalThreat[1], 0.0f, 1.0f) * 0.3f;
+      risk += std::clamp(out.tacticalThreat[0] + out.tacticalThreat[1], kRiskMin, kRiskMax) * kRiskStrategyScale;
     }
     if (transformerCritic_ && transformerCritic_->enabled) {
       const auto meta = transformerCritic_->evaluate(boardSnapshot_.squares, boardSnapshot_.whiteToMove, 4, 0);
-      risk += meta.tactical * 0.25f;
+      risk += meta.tactical * kRiskTransformerScale;
     }
-    return std::clamp(risk, 0.0f, 1.0f);
+    return std::clamp(risk, kRiskMin, kRiskMax);
   }
 
   float ugdsPriority(const UGDSEdge& edge) const {
-    constexpr float A = 70.0f;
-    constexpr float B = 55.0f;
-    constexpr float C = 35.0f;
     const float uncertaintyBonus = std::sqrt(edge.uncertainty / static_cast<float>(1 + edge.visits));
     const float priorBonus = edge.prior / static_cast<float>(1 + edge.visits);
-    const float refutationPenalty = edge.refutationStrength * edge.refutationConfidence * 90.0f;
-    const float fragilityPenalty = edge.fragile ? 35.0f : 0.0f;
-    return edge.q + A * uncertaintyBonus + B * edge.tacticalRisk + C * priorBonus - refutationPenalty - fragilityPenalty;
+    const float refutationPenalty = edge.refutationStrength * edge.refutationConfidence * kUGDSPriorityRefutationPenalty;
+    const float fragilityPenalty = edge.fragile ? kUGDSPriorityFragilePenalty : 0.0f;
+    return edge.q + kUGDSPriorityUncertaintyCoeff * uncertaintyBonus + kUGDSPriorityRiskCoeff * edge.tacticalRisk +
+           kUGDSPriorityPriorCoeff * priorBonus - refutationPenalty - fragilityPenalty;
   }
 
   float suspicionScore(const UGDSEdge& edge) const {
@@ -733,7 +758,27 @@ class Searcher {
   }
 
   int moveOrderingBias(const movegen::Move& m, int ply) const {
+    auto pieceValue = [](char piece) {
+      switch (static_cast<char>(std::tolower(static_cast<unsigned char>(piece)))) {
+        case 'p': return 100;
+        case 'n': return 320;
+        case 'b': return 330;
+        case 'r': return 500;
+        case 'q': return 900;
+        case 'k': return 20000;
+        default: return 0;
+      }
+    };
+
     int bias = 0;
+    const char victim = boardSnapshot_.squares[static_cast<std::size_t>(m.to)];
+    const char attacker = boardSnapshot_.squares[static_cast<std::size_t>(m.from)];
+    if (victim != '.') {
+      const int mvvLva = pieceValue(victim) - pieceValue(attacker) / 16;
+      bias += 220 + mvvLva / 4;
+    }
+    if (m.promotion != '\0') bias += 260;
+
     if (history_) bias += history_->score[m.from][m.to] * 4;
     if (killer_ && ply < static_cast<int>(killer_->killer.size())) {
       const auto& k0 = killer_->killer[ply][0];
@@ -776,6 +821,8 @@ class Searcher {
     float nnueWeight = 1.0f;
     float megaWeight = 1.0f;
     float blitzWeight = 1.0f;
+    int nnueContribution = 0;
+    int megaContribution = 0;
     if (transformerCritic_ && transformerCritic_->enabled) {
       const auto meta = transformerCritic_->evaluate(boardSnapshot_.squares, boardSnapshot_.whiteToMove, depth, lastIterationScore_);
       nnueWeight = meta.netWeights[0];
@@ -783,13 +830,23 @@ class Searcher {
       blitzWeight = meta.netWeights[2];
     }
     if (nnue_ && nnue_->enabled) {
-      if (useMaster) score += static_cast<int>(nnueWeight * (nnue_->evaluateFromAccumulator(nnueAccumulator_) / 24.0f));
-      else score += static_cast<int>(nnueWeight * (nnue_->evaluateDraft(nnueAccumulator_.features) / 24.0f));
+      if (useMaster) nnueContribution = static_cast<int>(nnueWeight * (nnue_->evaluateFromAccumulator(nnueAccumulator_) / 24.0f));
+      else nnueContribution = static_cast<int>(nnueWeight * (nnue_->evaluateDraft(nnueAccumulator_.features) / 24.0f));
+      score += nnueContribution;
     }
     if (strategyNet_ && strategyNet_->enabled && useMaster) {
       const auto& out = getStrategyOutput(false);
       const float wdlEdge = out.wdl[0] - out.wdl[2];
-      score += static_cast<int>(megaWeight * wdlEdge * 40.0f);
+      megaContribution = static_cast<int>(megaWeight * wdlEdge * 40.0f);
+      if (nnue_ && nnue_->enabled) {
+        const int divergence = std::abs(nnueContribution - megaContribution);
+        if (divergence > kDivergenceDampThirdThreshold) {
+          megaContribution /= 3;  // stabilize blended evals when small/big nets disagree hard
+        } else if (divergence > kDivergenceDampHalfThreshold) {
+          megaContribution /= 2;
+        }
+      }
+      score += megaContribution;
     }
     if (policy_ && policy_->enabled && !policy_->priors.empty()) {
       const std::size_t idx = static_cast<std::size_t>((move.from * 13 + move.to * 7 + depth) % static_cast<int>(policy_->priors.size()));
