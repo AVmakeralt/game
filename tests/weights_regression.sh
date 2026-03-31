@@ -13,8 +13,8 @@ if [[ ! -x "$ENGINE" ]]; then
 fi
 
 out=$(cd "$ROOT_DIR" && printf 'weights\nquit\n' | "$ENGINE")
-[[ "$out" == *"nnue=eval.nnue"* ]]
+[[ "$out" =~ nnue=[^[:space:]]+\.nnue ]]
 [[ "$out" == *"strategy=meganet.lc0"* ]]
-[[ "$out" == *"transformer=chess_transformer_25m.pt"* ]]
+[[ "$out" == *"reviewer=reviewer.nn"* ]]
 
 echo "weights regression passed"

@@ -50,7 +50,7 @@ int Searcher::quiescence(board::Board& b, int alpha, int beta, int ply) {
   if (stand >= beta) return beta;
   alpha = std::max(alpha, stand);
 
-  auto moves = movegen::generatePseudoLegal(b);
+  auto moves = movegen::generateLegal(b);
   for (const auto& m : moves) {
     if (b.squares[m.to] == '.' && !m.promotion) continue;
     if (see(b, m) < -120) continue;
