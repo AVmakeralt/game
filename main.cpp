@@ -1,5 +1,7 @@
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cstdio>
 #include <fstream>
 #include <numeric>
 #include <iostream>
@@ -25,6 +27,7 @@ struct State {
   std::ofstream logFile;
   bool running = true;
   bool stopRequested = false;
+  bool adaptiveSwitching = true;
   std::uint64_t perftNodes = 0;
   std::string openingCachePath = "opening_cache.txt";
 
@@ -56,6 +59,7 @@ struct State {
   engine_components::timing::Manager timeManager;
   engine_components::tooling::Formats formats;
   engine_components::tooling::Integrity integrity;
+  engine_components::tooling::SyzygyConfig syzygy;
   engine_components::tooling::RamTablebase ramTablebase;
   engine_components::tooling::TestHarness tests;
 };
@@ -147,6 +151,143 @@ std::string openingKey(const State& state) {
   return oss.str();
 }
 
+struct MaterialProfile {
+  int pieceCount = 0;
+  int whiteNonKing = 0;
+  int blackNonKing = 0;
+};
+
+MaterialProfile materialProfile(const board::Board& board) {
+  MaterialProfile profile;
+  for (char piece : board.squares) {
+    if (piece == '.') continue;
+    ++profile.pieceCount;
+    const char p = static_cast<char>(std::tolower(static_cast<unsigned char>(piece)));
+    if (p == 'k') continue;
+    if (std::isupper(static_cast<unsigned char>(piece))) ++profile.whiteNonKing;
+    else ++profile.blackNonKing;
+  }
+  return profile;
+}
+
+std::string materialKey(const MaterialProfile& profile) {
+  return "K" + std::to_string(profile.whiteNonKing) + "v" + std::to_string(profile.blackNonKing);
+}
+
+bool resolveTablebaseRootMove(State& state, movegen::Move& bestMove, int& rootWdl, std::string& rootKey) {
+  if (!state.ramTablebase.enabled || !state.ramTablebase.loaded) return false;
+  const auto legal = movegen::generateLegal(state.board);
+  if (legal.empty()) return false;
+
+  int bestScore = -2;
+  bool found = false;
+  for (const auto& move : legal) {
+    board::Undo undo;
+    if (!state.board.makeMove(move.from, move.to, move.promotion, undo)) continue;
+    const MaterialProfile childProfile = materialProfile(state.board);
+    const std::string childKey = materialKey(childProfile);
+    const int childWdl = state.ramTablebase.probe(childKey);
+    state.board.unmakeMove(move.from, move.to, move.promotion, undo);
+
+    if (childWdl == 0) continue;
+    const int score = -childWdl;
+    if (!found || score > bestScore) {
+      found = true;
+      bestScore = score;
+      bestMove = move;
+      rootWdl = score;
+      rootKey = childKey;
+    }
+  }
+  return found;
+}
+
+std::string boardToFEN(const board::Board& b) {
+  std::ostringstream oss;
+  for (int rank = 7; rank >= 0; --rank) {
+    int empties = 0;
+    for (int file = 0; file < 8; ++file) {
+      const char piece = b.squares[rank * 8 + file];
+      if (piece == '.') {
+        ++empties;
+        continue;
+      }
+      if (empties > 0) {
+        oss << empties;
+        empties = 0;
+      }
+      oss << piece;
+    }
+    if (empties > 0) oss << empties;
+    if (rank) oss << '/';
+  }
+  oss << ' ' << (b.whiteToMove ? 'w' : 'b') << ' ';
+  std::string castling = "-";
+  if (b.castlingRights) {
+    castling.clear();
+    if (b.castlingRights & 1) castling.push_back('K');
+    if (b.castlingRights & 2) castling.push_back('Q');
+    if (b.castlingRights & 4) castling.push_back('k');
+    if (b.castlingRights & 8) castling.push_back('q');
+  }
+  oss << castling << ' ';
+  if (b.enPassantSquare >= 0) oss << board::Board::squareName(b.enPassantSquare);
+  else oss << '-';
+  oss << ' ' << b.halfmoveClock << ' ' << b.fullmoveNumber;
+  return oss.str();
+}
+
+std::string shellSingleQuote(const std::string& text) {
+  std::string out = "'";
+  for (char c : text) {
+    if (c == '\'') out += "'\"'\"'";
+    else out.push_back(c);
+  }
+  out.push_back('\'');
+  return out;
+}
+
+struct SyzygyProbeResult {
+  int wdl = 0;
+  int dtz = 0;
+  std::string bestMove;
+};
+
+bool probeSyzygy(const State& state, const search::Limits& limits, SyzygyProbeResult& out) {
+  if (!state.syzygy.enabled || state.syzygy.probeCommand.empty()) return false;
+  const MaterialProfile profile = materialProfile(state.board);
+  if (profile.pieceCount > state.syzygy.probeLimit) return false;
+  if (limits.depth > 0 && limits.depth < state.syzygy.probeDepth) return false;
+
+  const std::string fen = boardToFEN(state.board);
+  const std::string cmd = state.syzygy.probeCommand + " " + shellSingleQuote(fen);
+  std::array<char, 256> buffer{};
+  std::string output;
+  FILE* pipe = popen(cmd.c_str(), "r");
+  if (!pipe) return false;
+  while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+    output += buffer.data();
+  }
+  const int rc = pclose(pipe);
+  if (rc != 0 || output.empty()) return false;
+
+  std::istringstream iss(output);
+  if (!(iss >> out.wdl)) return false;
+  if (!(iss >> out.dtz)) out.dtz = 0;
+  if (!(iss >> out.bestMove)) out.bestMove.clear();
+  return true;
+}
+
+bool isTacticalPosition(const State& state) {
+  if (state.board.inCheck(state.board.whiteToMove)) return true;
+  const auto legal = movegen::generateLegal(state.board);
+  int captures = 0;
+  for (const auto& move : legal) {
+    if (state.board.squares[move.to] != '.') ++captures;
+  }
+  return captures >= 3;
+}
+
 std::string encodeSearchBinpackRecord(const State& state, const std::string& key, const search::Result& result,
                                       const movegen::Move& bestMove, bool novel) {
   std::ostringstream record;
@@ -190,19 +331,9 @@ void initialize(State& state) {
   state.repetition.clear();
   state.perftNodes = 0;
 
-  int pieceCount = 0;
-  int whiteNonKing = 0;
-  int blackNonKing = 0;
-  for (char piece : state.board.squares) {
-    if (piece == '.') continue;
-    ++pieceCount;
-    const char p = static_cast<char>(std::tolower(static_cast<unsigned char>(piece)));
-    if (p == 'k') continue;
-    if (std::isupper(static_cast<unsigned char>(piece))) ++whiteNonKing;
-    else ++blackNonKing;
-  }
-  if (pieceCount <= 6) {
-    const std::string tbKey = "K" + std::to_string(whiteNonKing) + "v" + std::to_string(blackNonKing);
+  const MaterialProfile initProfile = materialProfile(state.board);
+  if (initProfile.pieceCount <= 6) {
+    const std::string tbKey = materialKey(initProfile);
     const int tbWdl = state.ramTablebase.probe(tbKey);
     if (tbWdl != 0) {
       std::cout << "info string ram_tablebase hit key=" << tbKey << " wdl=" << tbWdl << '\n';
@@ -263,6 +394,11 @@ void printUciId() {
   std::cout << "option name UseAMXNNUEPath type check default false\n";
   std::cout << "option name StrategyUseHardPhaseSwitch type check default true\n";
   std::cout << "option name StrategyActiveExperts type spin default 2 min 1 max 2\n";
+  std::cout << "option name UseAdaptiveSwitching type check default true\n";
+  std::cout << "option name UseSyzygy type check default false\n";
+  std::cout << "option name SyzygyProbeLimit type spin default 7 min 3 max 7\n";
+  std::cout << "option name SyzygyProbeDepth type spin default 1 min 0 max 64\n";
+  std::cout << "option name SyzygyProbeCommand type string default \n";
   std::cout << "option name UseRamTablebase type check default false\n";
   std::cout << "option name AntiCheat type check default false\n";
   std::cout << "option name ReviewerEnabled type check default false\n";
@@ -325,6 +461,16 @@ void handleSetOption(State& state, const std::string& cmd) {
     state.strategyNet.cfg.useHardPhaseSwitch = (value == "true");
   } else if (name == "StrategyActiveExperts") {
     state.strategyNet.cfg.activeExperts = std::clamp(std::stoi(value), 1, 2);
+  } else if (name == "UseAdaptiveSwitching") {
+    state.adaptiveSwitching = (value == "true");
+  } else if (name == "UseSyzygy") {
+    state.syzygy.enabled = (value == "true");
+  } else if (name == "SyzygyProbeLimit") {
+    state.syzygy.probeLimit = std::clamp(std::stoi(value), 3, 7);
+  } else if (name == "SyzygyProbeDepth") {
+    state.syzygy.probeDepth = std::max(0, std::stoi(value));
+  } else if (name == "SyzygyProbeCommand") {
+    state.syzygy.probeCommand = value;
   } else if (name == "ReviewerEnabled") {
     state.training.reviewerEnabled = (value == "true");
   } else if (name == "ReviewerWeights") {
@@ -436,29 +582,45 @@ void handleGo(State& state, const std::string& cmd) {
     return;
   }
 
-  int pieceCount = 0;
-  int whiteNonKing = 0;
-  int blackNonKing = 0;
-  for (char piece : state.board.squares) {
-    if (piece == '.') continue;
-    ++pieceCount;
-    const char p = static_cast<char>(std::tolower(static_cast<unsigned char>(piece)));
-    if (p == 'k') continue;
-    if (std::isupper(static_cast<unsigned char>(piece))) ++whiteNonKing;
-    else ++blackNonKing;
-  }
-  if (pieceCount <= 6) {
-    const std::string tbKey = "K" + std::to_string(whiteNonKing) + "v" + std::to_string(blackNonKing);
+  const MaterialProfile profile = materialProfile(state.board);
+  if (profile.pieceCount <= 6) {
+    const std::string tbKey = materialKey(profile);
     const int tbWdl = state.ramTablebase.probe(tbKey);
     if (tbWdl != 0) {
       std::cout << "info string ram_tablebase hit key=" << tbKey << " wdl=" << tbWdl << '\n';
+      movegen::Move tbMove;
+      int rootWdl = 0;
+      std::string childKey;
+      if (resolveTablebaseRootMove(state, tbMove, rootWdl, childKey)) {
+        std::cout << "info string ram_tablebase exact_root true child_key=" << childKey
+                  << " root_wdl=" << rootWdl << '\n';
+        std::cout << "bestmove " << tbMove.toUCI() << "\n";
+        return;
+      }
     }
   }
 
   state.stopRequested = false;
   const search::Limits limits = parseGoLimits(state, cmd);
+  const bool tactical = isTacticalPosition(state);
+  if (state.syzygy.enabled) {
+    SyzygyProbeResult syz;
+    if (probeSyzygy(state, limits, syz)) {
+      std::cout << "info string syzygy_hit true wdl=" << syz.wdl << " dtz=" << syz.dtz << '\n';
+      movegen::Move parsed;
+      if (!syz.bestMove.empty() && movegen::parseUCIMove(syz.bestMove, parsed) && movegen::isLegalMove(state.board, parsed)) {
+        std::cout << "bestmove " << syz.bestMove << "\n";
+        return;
+      }
+    }
+  }
+  const bool forceAlphaBeta = state.adaptiveSwitching && (profile.pieceCount <= 12 || tactical);
+  const bool allowMcts = state.features.useMCTS && !forceAlphaBeta;
 
-  search::Searcher searcher(state.features, &state.killer, &state.history, &state.counter, &state.pvTable, &state.see,
+  auto searchFeatures = state.features;
+  searchFeatures.useMCTS = allowMcts;
+
+  search::Searcher searcher(searchFeatures, &state.killer, &state.history, &state.counter, &state.pvTable, &state.see,
                             &state.handcrafted, &state.policy, &state.nnue, &state.strategyNet, &state.transformerCritic,
                             state.mcts, state.parallel, &state.tt);
   const search::Result result = searcher.think(state.board, limits, state.rng, &state.stopRequested);
