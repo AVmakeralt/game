@@ -23,7 +23,6 @@ struct Move {
 };
 
 bool parseUCIMove(const std::string& text, Move& out);
-std::vector<Move> generatePseudoLegal(const board::Board& b);
 std::vector<Move> generateLegal(const board::Board& b);
 bool isLegalMove(const board::Board& b, const Move& m);
 

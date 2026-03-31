@@ -1,5 +1,6 @@
 #include "movegen.h"
 
+#include <algorithm>
 #include <cctype>
 
 namespace movegen {
@@ -28,42 +29,59 @@ static bool sameSide(char a, char b) {
   return std::isupper(static_cast<unsigned char>(a)) == std::isupper(static_cast<unsigned char>(b));
 }
 
-static void pushPawnMove(std::vector<Move>& out, int from, int to, bool promotionRank) {
-  if (!promotionRank) {
-    out.push_back({from, to, '\0'});
-  } else {
-    out.push_back({from, to, 'q'});
-    out.push_back({from, to, 'r'});
-    out.push_back({from, to, 'b'});
-    out.push_back({from, to, 'n'});
-  }
+static bool tryAddLegalMove(board::Board& copy, std::vector<Move>& legal, const Move& m) {
+  board::Undo u;
+  if (!copy.makeMove(m.from, m.to, m.promotion, u)) return false;
+  legal.push_back(m);
+  copy.unmakeMove(m.from, m.to, m.promotion, u);
+  return true;
 }
 
-std::vector<Move> generatePseudoLegal(const board::Board& b) {
-  std::vector<Move> moves;
+std::vector<Move> generateLegal(const board::Board& b) {
+  std::vector<Move> legal;
+  legal.reserve(96);
+  static constexpr int pawnCaptureDf[2] = {-1, 1};
+  board::Board copy = b;
   for (int from = 0; from < 64; ++from) {
-    char piece = b.squares[from];
+    const char piece = b.squares[from];
     if (piece == '.') continue;
-    bool white = std::isupper(static_cast<unsigned char>(piece));
+    const bool white = std::isupper(static_cast<unsigned char>(piece));
     if (white != b.whiteToMove) continue;
-    int r = from / 8, f = from % 8;
-    char p = static_cast<char>(std::tolower(static_cast<unsigned char>(piece)));
+    const int r = from / 8;
+    const int f = from % 8;
+    const char p = static_cast<char>(std::tolower(static_cast<unsigned char>(piece)));
 
     if (p == 'p') {
-      int dir = white ? 1 : -1;
-      int one = from + dir * 8;
+      const int dir = white ? 1 : -1;
+      const int one = from + dir * 8;
       if (one >= 0 && one < 64 && b.squares[one] == '.') {
-        pushPawnMove(moves, from, one, (white && one / 8 == 7) || (!white && one / 8 == 0));
-        int two = from + dir * 16;
-        if ((white ? r == 1 : r == 6) && b.squares[two] == '.') moves.push_back({from, two, '\0'});
+        const bool promote = (white && one / 8 == 7) || (!white && one / 8 == 0);
+        if (!promote) {
+          tryAddLegalMove(copy, legal, {from, one, '\0'});
+        } else {
+          tryAddLegalMove(copy, legal, {from, one, 'q'});
+          tryAddLegalMove(copy, legal, {from, one, 'r'});
+          tryAddLegalMove(copy, legal, {from, one, 'b'});
+          tryAddLegalMove(copy, legal, {from, one, 'n'});
+        }
+        const int two = from + dir * 16;
+        if ((white ? r == 1 : r == 6) && b.squares[two] == '.') tryAddLegalMove(copy, legal, {from, two, '\0'});
       }
-      for (int df : {-1, 1}) {
-        int nf = f + df;
+      for (int df : pawnCaptureDf) {
+        const int nf = f + df;
         if (nf < 0 || nf > 7) continue;
-        int to = one + df;
+        const int to = one + df;
         if (to < 0 || to >= 64) continue;
         if ((b.squares[to] != '.' && !sameSide(piece, b.squares[to])) || to == b.enPassantSquare) {
-          pushPawnMove(moves, from, to, (white && to / 8 == 7) || (!white && to / 8 == 0));
+          const bool promote = (white && to / 8 == 7) || (!white && to / 8 == 0);
+          if (!promote) {
+            tryAddLegalMove(copy, legal, {from, to, '\0'});
+          } else {
+            tryAddLegalMove(copy, legal, {from, to, 'q'});
+            tryAddLegalMove(copy, legal, {from, to, 'r'});
+            tryAddLegalMove(copy, legal, {from, to, 'b'});
+            tryAddLegalMove(copy, legal, {from, to, 'n'});
+          }
         }
       }
       continue;
@@ -72,10 +90,10 @@ std::vector<Move> generatePseudoLegal(const board::Board& b) {
     if (p == 'n') {
       static const int d[8][2] = {{1,2},{2,1},{2,-1},{1,-2},{-1,-2},{-2,-1},{-2,1},{-1,2}};
       for (auto& k : d) {
-        int nf = f + k[0], nr = r + k[1];
+        const int nf = f + k[0], nr = r + k[1];
         if (nf < 0 || nf > 7 || nr < 0 || nr > 7) continue;
-        int to = nr * 8 + nf;
-        if (!sameSide(piece, b.squares[to])) moves.push_back({from, to, '\0'});
+        const int to = nr * 8 + nf;
+        if (!sameSide(piece, b.squares[to])) tryAddLegalMove(copy, legal, {from, to, '\0'});
       }
       continue;
     }
@@ -84,9 +102,9 @@ std::vector<Move> generatePseudoLegal(const board::Board& b) {
       for (int i = 0; i < count; ++i) {
         int nf = f + dirs[i][0], nr = r + dirs[i][1];
         while (nf >= 0 && nf < 8 && nr >= 0 && nr < 8) {
-          int to = nr * 8 + nf;
+          const int to = nr * 8 + nf;
           if (sameSide(piece, b.squares[to])) break;
-          moves.push_back({from, to, '\0'});
+          tryAddLegalMove(copy, legal, {from, to, '\0'});
           if (b.squares[to] != '.' || single) break;
           nf += dirs[i][0]; nr += dirs[i][1];
         }
@@ -104,38 +122,31 @@ std::vector<Move> generatePseudoLegal(const board::Board& b) {
       slide(kdirs, 8, true);
       if (white) {
         if ((b.castlingRights & 1) && b.squares[5] == '.' && b.squares[6] == '.' &&
-            !b.isSquareAttacked(4, false) && !b.isSquareAttacked(5, false) && !b.isSquareAttacked(6, false)) moves.push_back({4, 6, '\0'});
+            !b.isSquareAttacked(4, false) && !b.isSquareAttacked(5, false) && !b.isSquareAttacked(6, false)) {
+          tryAddLegalMove(copy, legal, {4, 6, '\0'});
+        }
         if ((b.castlingRights & 2) && b.squares[3] == '.' && b.squares[2] == '.' && b.squares[1] == '.' &&
-            !b.isSquareAttacked(4, false) && !b.isSquareAttacked(3, false) && !b.isSquareAttacked(2, false)) moves.push_back({4, 2, '\0'});
+            !b.isSquareAttacked(4, false) && !b.isSquareAttacked(3, false) && !b.isSquareAttacked(2, false)) {
+          tryAddLegalMove(copy, legal, {4, 2, '\0'});
+        }
       } else {
         if ((b.castlingRights & 4) && b.squares[61] == '.' && b.squares[62] == '.' &&
-            !b.isSquareAttacked(60, true) && !b.isSquareAttacked(61, true) && !b.isSquareAttacked(62, true)) moves.push_back({60, 62, '\0'});
+            !b.isSquareAttacked(60, true) && !b.isSquareAttacked(61, true) && !b.isSquareAttacked(62, true)) {
+          tryAddLegalMove(copy, legal, {60, 62, '\0'});
+        }
         if ((b.castlingRights & 8) && b.squares[59] == '.' && b.squares[58] == '.' && b.squares[57] == '.' &&
-            !b.isSquareAttacked(60, true) && !b.isSquareAttacked(59, true) && !b.isSquareAttacked(58, true)) moves.push_back({60, 58, '\0'});
+            !b.isSquareAttacked(60, true) && !b.isSquareAttacked(59, true) && !b.isSquareAttacked(58, true)) {
+          tryAddLegalMove(copy, legal, {60, 58, '\0'});
+        }
       }
-    }
-  }
-  return moves;
-}
-
-std::vector<Move> generateLegal(const board::Board& b) {
-  auto pseudo = generatePseudoLegal(b);
-  std::vector<Move> legal;
-  board::Board copy = b;
-  for (const auto& m : pseudo) {
-    board::Undo u;
-    if (copy.makeMove(m.from, m.to, m.promotion, u)) {
-      legal.push_back(m);
-      copy.unmakeMove(m.from, m.to, m.promotion, u);
     }
   }
   return legal;
 }
 
 bool isLegalMove(const board::Board& b, const Move& m) {
-  auto legal = generateLegal(b);
-  for (const auto& x : legal) if (x == m) return true;
-  return false;
+  const auto legal = generateLegal(b);
+  return std::find(legal.begin(), legal.end(), m) != legal.end();
 }
 
 }  // namespace movegen

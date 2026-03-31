@@ -314,7 +314,8 @@ class Searcher {
         }
 
         std::vector<std::future<int>> scouts;
-        const int scoutCount = std::min(7, static_cast<int>(ordered.size()));
+        const int scoutCount = features_.useAsync ? std::min(7, static_cast<int>(ordered.size())) : 0;
+        scouts.reserve(static_cast<std::size_t>(scoutCount));
         for (int i = 0; i < scoutCount; ++i) {
           const movegen::Move scoutMove = ordered[static_cast<std::size_t>(i)].second;
           scouts.push_back(std::async(std::launch::async, [this, scoutMove, depth]() {
@@ -705,20 +706,12 @@ class Searcher {
       const auto& out = getStrategyOutput(false);
       const float tacticalPressure = (out.tacticalThreat[0] + out.tacticalThreat[1]);
       if (tacticalPressure < 0.05f) {
-        best = std::min(best, beta - 2);  // soft quiescence pruning
-      }
-    }
-
-    if (strategyNet_ && strategyNet_->enabled) {
-      const auto& out = getStrategyOutput(false);
-      const float tacticalPressure = (out.tacticalThreat[0] + out.tacticalThreat[1]);
-      if (tacticalPressure < 0.05f) {
         beta -= 2;  // soft quiescence pruning when no tactical pressure is predicted
       }
     }
 
     if (beta < alpha) beta = alpha;
-    return std::clamp(standPat, alpha, beta);
+    return std::clamp(best, alpha, beta);
   }
 
 
