@@ -990,10 +990,9 @@ struct Book {
   std::unordered_map<std::string, std::string> moveByKey;
 
   void seedDefaults() {
-    if (!moveByKey.empty()) return;
-    moveByKey["startpos"] = "e2e4";
-    moveByKey["e2e4"] = "e7e5";
-    moveByKey["d2d4"] = "d7d5";
+    // Intentionally left empty: opening books should be data-driven.
+    // Keeping this hook allows callers to initialize from external sources
+    // without forcing a hard-coded first move.
   }
 
   std::string probe(const std::string& key) const {
@@ -1087,6 +1086,13 @@ struct Integrity {
   bool antiCheatEnabled = false;
   bool checksumOk = true;
   bool verifyRuntime() const { return !antiCheatEnabled || checksumOk; }
+};
+
+struct SyzygyConfig {
+  bool enabled = false;
+  std::string probeCommand;
+  int probeLimit = 7;
+  int probeDepth = 1;
 };
 
 struct RamTablebase {
