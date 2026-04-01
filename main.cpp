@@ -178,6 +178,13 @@ std::string openingKey(const State& state) {
   return oss.str();
 }
 
+bool isLikelyThreefoldRepetition(const board::Board& b) {
+  if (b.history.size() < 8) return false;
+  const std::size_t n = b.history.size();
+  return b.history[n - 1] == b.history[n - 5] && b.history[n - 2] == b.history[n - 6] &&
+         b.history[n - 3] == b.history[n - 7] && b.history[n - 4] == b.history[n - 8];
+}
+
 struct MaterialProfile {
   int pieceCount = 0;
   int whiteNonKing = 0;
@@ -626,7 +633,7 @@ void handleGo(State& state, const std::string& cmd) {
     std::cout << "bestmove 0000\n";
     return;
   }
-  if (state.repetition.isThreefold(tt::hash(state.board))) {
+  if (isLikelyThreefoldRepetition(state.board)) {
     std::cout << "info string draw by repetition\n";
     std::cout << "bestmove 0000\n";
     return;

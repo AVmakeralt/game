@@ -777,7 +777,6 @@ class Searcher {
     int bias = 0;
     const char victim = boardSnapshot_.squares[static_cast<std::size_t>(m.to)];
     const char attacker = boardSnapshot_.squares[static_cast<std::size_t>(m.from)];
-    const char attackerType = static_cast<char>(std::tolower(static_cast<unsigned char>(attacker)));
     const bool isCapture = victim != '.';
     const bool isQuiet = !isCapture && m.promotion == '\0';
     if (victim != '.') {
@@ -797,26 +796,6 @@ class Searcher {
     }
     if (isQuiet && isLikelyRepetition(boardSnapshot_)) {
       bias -= 1200;  // add draw-avoidance pressure once oscillation is detected.
-    }
-    if (attackerType == 'k') {
-      const bool castlingLike = std::abs(m.to - m.from) == 2;
-      const bool inCheck = boardSnapshot_.inCheck(boardSnapshot_.whiteToMove);
-      if (castlingLike) {
-        bias += 550;  // explicit strategic preference: complete king safety early.
-      } else if (!inCheck) {
-        const auto phase = detectGamePhase();
-        const int toRank = m.to / 8;
-        const int toFile = m.to % 8;
-        const int homeRank = boardSnapshot_.whiteToMove ? 0 : 7;
-        const int rankDrift = std::abs(toRank - homeRank);
-        const bool centralFile = toFile >= 2 && toFile <= 5;
-        if (phase != engine_components::eval_model::GamePhase::Endgame) {
-          bias -= rankDrift * 180;
-          if (centralFile) bias -= 180;
-        } else {
-          bias += std::max(0, 2 - rankDrift) * 40;
-        }
-      }
     }
 
     if (history_) bias += history_->score[m.from][m.to] * 4;
