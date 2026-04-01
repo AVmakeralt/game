@@ -237,20 +237,24 @@ struct NNUE {
 
   bool load(const std::string& path) {
     weightsPath = path;
-    initializeWeights();
-
     std::ifstream in(path, std::ios::binary);
-    if (in) {
-      in.read(reinterpret_cast<char*>(w1.data()), static_cast<std::streamsize>(w1.size() * sizeof(float)));
-      in.read(reinterpret_cast<char*>(b1.data()), static_cast<std::streamsize>(b1.size() * sizeof(float)));
-      in.read(reinterpret_cast<char*>(w2.data()), static_cast<std::streamsize>(w2.size() * sizeof(float)));
-      in.read(reinterpret_cast<char*>(b2.data()), static_cast<std::streamsize>(b2.size() * sizeof(float)));
-      in.read(reinterpret_cast<char*>(w3.data()), static_cast<std::streamsize>(w3.size() * sizeof(float)));
-      in.read(reinterpret_cast<char*>(&b3), static_cast<std::streamsize>(sizeof(b3)));
+    if (!in) {
+      enabled = false;
+      return false;
     }
-
-    enabled = true;
-    return true;
+    initializeWeights();
+    auto readExact = [&](void* dst, std::size_t bytes) {
+      in.read(reinterpret_cast<char*>(dst), static_cast<std::streamsize>(bytes));
+      return in.good() || in.gcount() == static_cast<std::streamsize>(bytes);
+    };
+    const bool ok = readExact(w1.data(), w1.size() * sizeof(float)) &&
+                    readExact(b1.data(), b1.size() * sizeof(float)) &&
+                    readExact(w2.data(), w2.size() * sizeof(float)) &&
+                    readExact(b2.data(), b2.size() * sizeof(float)) &&
+                    readExact(w3.data(), w3.size() * sizeof(float)) &&
+                    readExact(&b3, sizeof(b3));
+    enabled = ok;
+    return ok;
   }
 
   static std::vector<float> extractFeatures(const std::array<char, 64>& squares, bool whiteToMove, int inputSize) {
@@ -621,28 +625,28 @@ struct StrategyNet {
 
   bool load(const std::string& path) {
     weightsPath = path;
-    initializeWeights();
-
     std::ifstream in(path, std::ios::binary);
-    if (in) {
-      in.read(reinterpret_cast<char*>(stem.data()), static_cast<std::streamsize>(stem.size() * sizeof(float)));
-      in.read(reinterpret_cast<char*>(tokenProjection.data()), static_cast<std::streamsize>(tokenProjection.size() * sizeof(float)));
-      in.read(reinterpret_cast<char*>(attentionQ.data()), static_cast<std::streamsize>(attentionQ.size() * sizeof(float)));
-      in.read(reinterpret_cast<char*>(attentionK.data()), static_cast<std::streamsize>(attentionK.size() * sizeof(float)));
-      in.read(reinterpret_cast<char*>(attentionV.data()), static_cast<std::streamsize>(attentionV.size() * sizeof(float)));
-      for (auto& expert : expertBlocks) {
-        in.read(reinterpret_cast<char*>(expert.data()), static_cast<std::streamsize>(expert.size() * sizeof(float)));
-      }
-      for (auto& strategyBias : strategyBiasHead) {
-        in.read(reinterpret_cast<char*>(strategyBias.data()), static_cast<std::streamsize>(strategyBias.size() * sizeof(float)));
-      }
-      in.read(reinterpret_cast<char*>(valueHead.data()), static_cast<std::streamsize>(valueHead.size() * sizeof(float)));
-      in.read(reinterpret_cast<char*>(&valueBias), static_cast<std::streamsize>(sizeof(valueBias)));
-      in.read(reinterpret_cast<char*>(policyHead.data()), static_cast<std::streamsize>(policyHead.size() * sizeof(float)));
+    if (!in) {
+      enabled = false;
+      return false;
     }
-
-    enabled = true;
-    return true;
+    initializeWeights();
+    auto readExact = [&](void* dst, std::size_t bytes) {
+      in.read(reinterpret_cast<char*>(dst), static_cast<std::streamsize>(bytes));
+      return in.good() || in.gcount() == static_cast<std::streamsize>(bytes);
+    };
+    bool ok = readExact(stem.data(), stem.size() * sizeof(float)) &&
+              readExact(tokenProjection.data(), tokenProjection.size() * sizeof(float)) &&
+              readExact(attentionQ.data(), attentionQ.size() * sizeof(float)) &&
+              readExact(attentionK.data(), attentionK.size() * sizeof(float)) &&
+              readExact(attentionV.data(), attentionV.size() * sizeof(float));
+    for (auto& expert : expertBlocks) ok = ok && readExact(expert.data(), expert.size() * sizeof(float));
+    for (auto& strategyBias : strategyBiasHead) ok = ok && readExact(strategyBias.data(), strategyBias.size() * sizeof(float));
+    ok = ok && readExact(valueHead.data(), valueHead.size() * sizeof(float));
+    ok = ok && readExact(&valueBias, sizeof(valueBias));
+    ok = ok && readExact(policyHead.data(), policyHead.size() * sizeof(float));
+    enabled = ok;
+    return ok;
   }
 
   StrategyRouterInput computeRouterInput(const std::vector<float>& planes) const {
