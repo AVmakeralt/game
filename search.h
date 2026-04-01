@@ -241,6 +241,17 @@ class Searcher {
            b.history[n - 3] == b.history[n - 7] && b.history[n - 4] == b.history[n - 8];
   }
 
+  static bool parseHistoryMove(const board::Board& b, std::size_t pliesBack, movegen::Move* out) {
+    if (!out) return false;
+    if (b.history.size() <= pliesBack) return false;
+    const std::string& token = b.history[b.history.size() - 1 - pliesBack];
+    return movegen::parseUCIMove(token, *out);
+  }
+
+  static bool isImmediateBacktrack(const movegen::Move& candidate, const movegen::Move& previous) {
+    return candidate.from == previous.to && candidate.to == previous.from && candidate.promotion == previous.promotion;
+  }
+
   int cladeId(const movegen::Move& m) const {
     const int df = std::abs((m.to % 8) - (m.from % 8));
     const int dr = std::abs((m.to / 8) - (m.from / 8));
@@ -314,7 +325,8 @@ class Searcher {
         }
 
         std::vector<std::future<int>> scouts;
-        const int scoutCount = std::min(7, static_cast<int>(ordered.size()));
+        const int scoutCount = features_.useAsync ? std::min(7, static_cast<int>(ordered.size())) : 0;
+        scouts.reserve(static_cast<std::size_t>(scoutCount));
         for (int i = 0; i < scoutCount; ++i) {
           const movegen::Move scoutMove = ordered[static_cast<std::size_t>(i)].second;
           scouts.push_back(std::async(std::launch::async, [this, scoutMove, depth]() {
@@ -705,20 +717,12 @@ class Searcher {
       const auto& out = getStrategyOutput(false);
       const float tacticalPressure = (out.tacticalThreat[0] + out.tacticalThreat[1]);
       if (tacticalPressure < 0.05f) {
-        best = std::min(best, beta - 2);  // soft quiescence pruning
-      }
-    }
-
-    if (strategyNet_ && strategyNet_->enabled) {
-      const auto& out = getStrategyOutput(false);
-      const float tacticalPressure = (out.tacticalThreat[0] + out.tacticalThreat[1]);
-      if (tacticalPressure < 0.05f) {
         beta -= 2;  // soft quiescence pruning when no tactical pressure is predicted
       }
     }
 
     if (beta < alpha) beta = alpha;
-    return std::clamp(standPat, alpha, beta);
+    return std::clamp(best, alpha, beta);
   }
 
 
@@ -773,11 +777,47 @@ class Searcher {
     int bias = 0;
     const char victim = boardSnapshot_.squares[static_cast<std::size_t>(m.to)];
     const char attacker = boardSnapshot_.squares[static_cast<std::size_t>(m.from)];
+    const char attackerType = static_cast<char>(std::tolower(static_cast<unsigned char>(attacker)));
+    const bool isCapture = victim != '.';
+    const bool isQuiet = !isCapture && m.promotion == '\0';
     if (victim != '.') {
       const int mvvLva = pieceValue(victim) - pieceValue(attacker) / 16;
       bias += 220 + mvvLva / 4;
     }
     if (m.promotion != '\0') bias += 260;
+
+    movegen::Move last{};
+    if (isQuiet && parseHistoryMove(boardSnapshot_, 0, &last) && isImmediateBacktrack(m, last)) {
+      bias -= 4000;  // hard anti-shuffle penalty; only allow if truly forced.
+    }
+    movegen::Move twoPliesBack{};
+    if (isQuiet && parseHistoryMove(boardSnapshot_, 2, &twoPliesBack) &&
+        m.from == twoPliesBack.from && m.to == twoPliesBack.to && m.promotion == twoPliesBack.promotion) {
+      bias -= 2800;  // suppress classic two-ply repetition loops.
+    }
+    if (isQuiet && isLikelyRepetition(boardSnapshot_)) {
+      bias -= 1200;  // add draw-avoidance pressure once oscillation is detected.
+    }
+    if (attackerType == 'k') {
+      const bool castlingLike = std::abs(m.to - m.from) == 2;
+      const bool inCheck = boardSnapshot_.inCheck(boardSnapshot_.whiteToMove);
+      if (castlingLike) {
+        bias += 550;  // explicit strategic preference: complete king safety early.
+      } else if (!inCheck) {
+        const auto phase = detectGamePhase();
+        const int toRank = m.to / 8;
+        const int toFile = m.to % 8;
+        const int homeRank = boardSnapshot_.whiteToMove ? 0 : 7;
+        const int rankDrift = std::abs(toRank - homeRank);
+        const bool centralFile = toFile >= 2 && toFile <= 5;
+        if (phase != engine_components::eval_model::GamePhase::Endgame) {
+          bias -= rankDrift * 180;
+          if (centralFile) bias -= 180;
+        } else {
+          bias += std::max(0, 2 - rankDrift) * 40;
+        }
+      }
+    }
 
     if (history_) bias += history_->score[m.from][m.to] * 4;
     if (killer_ && ply < static_cast<int>(killer_->killer.size())) {
@@ -800,9 +840,8 @@ class Searcher {
       const auto& out = getStrategyOutput(false);
       if (!out.policy.empty()) {
         const std::size_t to = static_cast<std::size_t>(m.to % static_cast<int>(out.policy.size()));
-        bias += static_cast<int>(out.policy[to] * 20.0f);
+        bias += static_cast<int>(out.policy[to] * 8.0f);
       }
-      bias += static_cast<int>((out.tacticalThreat[0] - out.tacticalThreat[1]) * 20.0f);
     }
     return bias;
   }
@@ -818,44 +857,63 @@ class Searcher {
   int evaluateMoveLazy(const movegen::Move& move, int depth, bool useMaster) const {
     int score = moveOrderingBias(move, depth);
     score += static_cast<int>(__builtin_popcountll(temporal_.velocityMask()) / 8);
-    float nnueWeight = 1.0f;
-    float megaWeight = 1.0f;
+    float nnueWeight = 0.70f;
+    float lc0Weight = useMaster ? 0.30f : 0.15f;
     float blitzWeight = 1.0f;
-    int nnueContribution = 0;
-    int megaContribution = 0;
     if (transformerCritic_ && transformerCritic_->enabled) {
       const auto meta = transformerCritic_->evaluate(boardSnapshot_.squares, boardSnapshot_.whiteToMove, depth, lastIterationScore_);
-      nnueWeight = meta.netWeights[0];
-      megaWeight = meta.netWeights[1];
+      nnueWeight = std::max(0.05f, meta.netWeights[0]);
+      lc0Weight = std::max(0.05f, meta.netWeights[1]) * (useMaster ? 1.0f : 0.5f);
       blitzWeight = meta.netWeights[2];
     }
+    const float netWeightSum = std::max(1e-5f, nnueWeight + lc0Weight);
+    nnueWeight /= netWeightSum;
+    lc0Weight /= netWeightSum;
+
+    int nnueCp = 0;
+    int lc0Cp = 0;
     if (nnue_ && nnue_->enabled) {
-      if (useMaster) nnueContribution = static_cast<int>(nnueWeight * (nnue_->evaluateFromAccumulator(nnueAccumulator_) / 24.0f));
-      else nnueContribution = static_cast<int>(nnueWeight * (nnue_->evaluateDraft(nnueAccumulator_.features) / 24.0f));
-      score += nnueContribution;
+      if (useMaster) nnueCp = static_cast<int>(nnue_->evaluateFromAccumulator(nnueAccumulator_) / 24.0f);
+      else nnueCp = static_cast<int>(nnue_->evaluateDraft(nnueAccumulator_.features) / 24.0f);
     }
-    if (strategyNet_ && strategyNet_->enabled && useMaster) {
+    if (strategyNet_ && strategyNet_->enabled) {
       const auto& out = getStrategyOutput(false);
-      const float wdlEdge = out.wdl[0] - out.wdl[2];
-      megaContribution = static_cast<int>(megaWeight * wdlEdge * 40.0f);
-      if (nnue_ && nnue_->enabled) {
-        const int divergence = std::abs(nnueContribution - megaContribution);
-        if (divergence > kDivergenceDampThirdThreshold) {
-          megaContribution /= 3;  // stabilize blended evals when small/big nets disagree hard
-        } else if (divergence > kDivergenceDampHalfThreshold) {
-          megaContribution /= 2;
-        }
-      }
-      score += megaContribution;
+      const int wdlCp = static_cast<int>((out.wdl[0] - out.wdl[2]) * 120.0f);
+      // valueCp is already in centipawn-ish space; blend with a bounded WDL-derived fallback.
+      lc0Cp = std::clamp(static_cast<int>(out.valueCp * 0.75f + wdlCp * 0.25f), -800, 800);
     }
+
+    int fusedCp = 0;
+    if (nnue_ && nnue_->enabled && strategyNet_ && strategyNet_->enabled) {
+      const int disagreement = std::abs(nnueCp - lc0Cp);
+      float damp = 1.0f;
+      if (disagreement > kDivergenceDampThirdThreshold) damp = 0.35f;
+      else if (disagreement > kDivergenceDampHalfThreshold) damp = 0.55f;
+      fusedCp = static_cast<int>((nnueWeight * nnueCp + lc0Weight * lc0Cp) * damp);
+      fusedCp -= std::min(80, disagreement / 4);  // avoid panic moves when networks disagree hard.
+    } else if (nnue_ && nnue_->enabled) {
+      fusedCp = nnueCp;
+    } else if (strategyNet_ && strategyNet_->enabled) {
+      fusedCp = lc0Cp;
+    }
+    score += fusedCp;
+
     if (policy_ && policy_->enabled && !policy_->priors.empty()) {
       const std::size_t idx = static_cast<std::size_t>((move.from * 13 + move.to * 7 + depth) % static_cast<int>(policy_->priors.size()));
-      score += static_cast<int>(blitzWeight * policy_->priors[idx] * 60.0f);
+      score += static_cast<int>(blitzWeight * policy_->priors[idx] * 12.0f);
     }
     return score;
   }
 
   void updateHeuristics(int ply, const movegen::Move& best) {
+    movegen::Move last{};
+    movegen::Move twoPliesBack{};
+    const bool immediateBacktrack = parseHistoryMove(boardSnapshot_, 0, &last) && isImmediateBacktrack(best, last);
+    const bool twoPlyLoop = parseHistoryMove(boardSnapshot_, 2, &twoPliesBack) &&
+                            best.from == twoPliesBack.from && best.to == twoPliesBack.to &&
+                            best.promotion == twoPliesBack.promotion;
+    const bool repetitive = immediateBacktrack || twoPlyLoop;
+
     if (killer_ && ply < static_cast<int>(killer_->killer.size())) {
       killer_->killer[ply][1] = killer_->killer[ply][0];
       killer_->killer[ply][0] = best;
@@ -868,7 +926,8 @@ class Searcher {
           history_->score[from][to] -= std::clamp(history_->score[from][to] / 64, -1, 1);
         }
       }
-      history_->score[best.from][best.to] += 4;
+      if (!repetitive) history_->score[best.from][best.to] += 4;
+      else history_->score[best.from][best.to] -= 8;
     }
     if (counter_ && best.from >= 0 && best.from < 64 && best.to >= 0 && best.to < 64) {
       counter_->counter[best.from][best.to] = best;
