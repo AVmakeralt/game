@@ -363,6 +363,7 @@ void initialize(State& state) {
   state.magic.initialize();
   state.zobrist.initialize();
   state.repetition.clear();
+  state.repetition.push(tt::hash(state.board));
   state.perftNodes = 0;
 
   const MaterialProfile initProfile = materialProfile(state.board);
@@ -542,6 +543,8 @@ void handlePosition(State& state, const std::string& cmd) {
     }
     if (token != "moves") return;
   }
+  state.repetition.clear();
+  state.repetition.push(tt::hash(state.board));
 
   if (token != "moves") {
     if (!(iss >> token) || token != "moves") return;
@@ -556,7 +559,7 @@ void handlePosition(State& state, const std::string& cmd) {
     }
     if (state.board.applyMove(mv.from, mv.to, mv.promotion)) {
       state.board.history.push_back(token);
-      state.repetition.push(static_cast<std::uint64_t>(state.board.history.size()));
+      state.repetition.push(tt::hash(state.board));
     }
   }
 }

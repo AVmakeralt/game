@@ -819,9 +819,8 @@ class Searcher {
       const auto& out = getStrategyOutput(false);
       if (!out.policy.empty()) {
         const std::size_t to = static_cast<std::size_t>(m.to % static_cast<int>(out.policy.size()));
-        bias += static_cast<int>(out.policy[to] * 20.0f);
+        bias += static_cast<int>(out.policy[to] * 8.0f);
       }
-      bias += static_cast<int>((out.tacticalThreat[0] - out.tacticalThreat[1]) * 20.0f);
     }
     return bias;
   }
@@ -837,39 +836,50 @@ class Searcher {
   int evaluateMoveLazy(const movegen::Move& move, int depth, bool useMaster) const {
     int score = moveOrderingBias(move, depth);
     score += static_cast<int>(__builtin_popcountll(temporal_.velocityMask()) / 8);
-    float nnueWeight = 1.0f;
-    float megaWeight = 1.0f;
+    float nnueWeight = 0.70f;
+    float lc0Weight = useMaster ? 0.30f : 0.15f;
     float blitzWeight = 1.0f;
-    int nnueContribution = 0;
-    int megaContribution = 0;
     if (transformerCritic_ && transformerCritic_->enabled) {
       const auto meta = transformerCritic_->evaluate(boardSnapshot_.squares, boardSnapshot_.whiteToMove, depth, lastIterationScore_);
-      nnueWeight = meta.netWeights[0];
-      megaWeight = meta.netWeights[1];
+      nnueWeight = std::max(0.05f, meta.netWeights[0]);
+      lc0Weight = std::max(0.05f, meta.netWeights[1]) * (useMaster ? 1.0f : 0.5f);
       blitzWeight = meta.netWeights[2];
     }
+    const float netWeightSum = std::max(1e-5f, nnueWeight + lc0Weight);
+    nnueWeight /= netWeightSum;
+    lc0Weight /= netWeightSum;
+
+    int nnueCp = 0;
+    int lc0Cp = 0;
     if (nnue_ && nnue_->enabled) {
-      if (useMaster) nnueContribution = static_cast<int>(nnueWeight * (nnue_->evaluateFromAccumulator(nnueAccumulator_) / 24.0f));
-      else nnueContribution = static_cast<int>(nnueWeight * (nnue_->evaluateDraft(nnueAccumulator_.features) / 24.0f));
-      score += nnueContribution;
+      if (useMaster) nnueCp = static_cast<int>(nnue_->evaluateFromAccumulator(nnueAccumulator_) / 24.0f);
+      else nnueCp = static_cast<int>(nnue_->evaluateDraft(nnueAccumulator_.features) / 24.0f);
     }
-    if (strategyNet_ && strategyNet_->enabled && useMaster) {
+    if (strategyNet_ && strategyNet_->enabled) {
       const auto& out = getStrategyOutput(false);
-      const float wdlEdge = out.wdl[0] - out.wdl[2];
-      megaContribution = static_cast<int>(megaWeight * wdlEdge * 40.0f);
-      if (nnue_ && nnue_->enabled) {
-        const int divergence = std::abs(nnueContribution - megaContribution);
-        if (divergence > kDivergenceDampThirdThreshold) {
-          megaContribution /= 3;  // stabilize blended evals when small/big nets disagree hard
-        } else if (divergence > kDivergenceDampHalfThreshold) {
-          megaContribution /= 2;
-        }
-      }
-      score += megaContribution;
+      const int wdlCp = static_cast<int>((out.wdl[0] - out.wdl[2]) * 120.0f);
+      // valueCp is already in centipawn-ish space; blend with a bounded WDL-derived fallback.
+      lc0Cp = std::clamp(static_cast<int>(out.valueCp * 0.75f + wdlCp * 0.25f), -800, 800);
     }
+
+    int fusedCp = 0;
+    if (nnue_ && nnue_->enabled && strategyNet_ && strategyNet_->enabled) {
+      const int disagreement = std::abs(nnueCp - lc0Cp);
+      float damp = 1.0f;
+      if (disagreement > kDivergenceDampThirdThreshold) damp = 0.35f;
+      else if (disagreement > kDivergenceDampHalfThreshold) damp = 0.55f;
+      fusedCp = static_cast<int>((nnueWeight * nnueCp + lc0Weight * lc0Cp) * damp);
+      fusedCp -= std::min(80, disagreement / 4);  // avoid panic moves when networks disagree hard.
+    } else if (nnue_ && nnue_->enabled) {
+      fusedCp = nnueCp;
+    } else if (strategyNet_ && strategyNet_->enabled) {
+      fusedCp = lc0Cp;
+    }
+    score += fusedCp;
+
     if (policy_ && policy_->enabled && !policy_->priors.empty()) {
       const std::size_t idx = static_cast<std::size_t>((move.from * 13 + move.to * 7 + depth) % static_cast<int>(policy_->priors.size()));
-      score += static_cast<int>(blitzWeight * policy_->priors[idx] * 60.0f);
+      score += static_cast<int>(blitzWeight * policy_->priors[idx] * 12.0f);
     }
     return score;
   }
