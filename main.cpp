@@ -397,8 +397,8 @@ void initialize(State& state) {
   state.features.policyPruneThreshold = state.strategyNet.cfg.pruneThreshold;
   state.features.useLazyEval = true;
   state.features.masterEvalTopMoves = 3;
-  state.nnue.load(resolveDefaultNNUEWeightsPath());
-  state.strategyNet.load(kDefaultStrategyWeights);
+  const bool nnueLoaded = state.nnue.load(resolveDefaultNNUEWeightsPath());
+  const bool strategyLoaded = state.strategyNet.load(kDefaultStrategyWeights);
   state.transformerCritic.load("chess_transformer_25m.pt");
   state.policy.priors = {0.70f, 0.20f, 0.10f};
   state.policy.name = "blitz net";
@@ -406,6 +406,8 @@ void initialize(State& state) {
   state.cache.load(state.openingCachePath);
   state.logFile.open("engine.log", std::ios::app);
   log(state, "engine initialized with search/eval/tooling scaffolding");
+  if (!nnueLoaded) log(state, "warning: nnue weights missing or incompatible; nnue disabled");
+  if (!strategyLoaded) log(state, "warning: strategy weights missing or incompatible; strategy net disabled");
   log(state, "nnue_params=" + std::to_string(state.nnue.parameterCount()) +
             " strategy_params=" + std::to_string(state.strategyNet.parameterCount()));
 }
@@ -621,6 +623,21 @@ void tuneMoveTimeForPosition(State& state, const MaterialProfile& profile, bool 
   limits.movetimeMs = std::max(1, tuned);
 }
 
+void tuneDepthForPosition(const State& state, const MaterialProfile& profile, bool tactical, search::Limits& limits) {
+  if (limits.infinite) return;
+  int adaptiveDepth = std::max(1, limits.depth);
+  const int legalCount = static_cast<int>(movegen::generateLegal(state.board).size());
+  if (state.board.inCheck(state.board.whiteToMove)) adaptiveDepth += 1;
+  if (tactical) adaptiveDepth += 2;
+  if (legalCount <= 10) adaptiveDepth += 1;
+  if (legalCount >= 40) adaptiveDepth -= 1;
+  if (profile.pieceCount <= 10) adaptiveDepth += 1;
+  if (limits.movetimeMs > 0) {
+    adaptiveDepth += std::min(5, limits.movetimeMs / 180);
+  }
+  limits.depth = std::clamp(adaptiveDepth, 2, 24);
+}
+
 void handleGo(State& state, const std::string& cmd) {
   if (!state.integrity.verifyRuntime()) {
     std::cout << "info string integrity-check-failed\n";
@@ -675,6 +692,7 @@ void handleGo(State& state, const std::string& cmd) {
   search::Limits limits = parseGoLimits(state, cmd);
   const bool tactical = isTacticalPosition(state);
   tuneMoveTimeForPosition(state, profile, tactical, limits);
+  tuneDepthForPosition(state, profile, tactical, limits);
   if (state.syzygy.enabled) {
     SyzygyProbeResult syz;
     if (probeSyzygy(state, limits, syz)) {
