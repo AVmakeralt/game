@@ -131,6 +131,17 @@ bool startsWith(const std::string& text, const std::string& prefix) {
   return text.size() >= prefix.size() && text.compare(0, prefix.size(), prefix) == 0;
 }
 
+int parseIntOrDefault(const std::string& text, int fallback) {
+  try {
+    std::size_t consumed = 0;
+    const int parsed = std::stoi(text, &consumed);
+    if (consumed != text.size()) return fallback;
+    return parsed;
+  } catch (...) {
+    return fallback;
+  }
+}
+
 constexpr const char* kDefaultStrategyWeights = "meganet.pt";
 
 std::string resolveDefaultNNUEWeightsPath() {
@@ -463,10 +474,10 @@ void handleSetOption(State& state, const std::string& cmd) {
   }
 
   if (name == "Hash") {
-    int mb = std::max(1, std::stoi(value));
+    const int mb = std::max(1, parseIntOrDefault(value, 64));
     state.tt.initialize(static_cast<std::size_t>(mb));
   } else if (name == "MultiPV") {
-    state.features.multiPV = std::max(1, std::stoi(value));
+    state.features.multiPV = std::max(1, parseIntOrDefault(value, state.features.multiPV));
   } else if (name == "UseNNUE") {
     state.nnue.enabled = (value == "true");
   } else if (name == "UseTransformerCritic") {
@@ -476,7 +487,7 @@ void handleSetOption(State& state, const std::string& cmd) {
   } else if (name == "UseStrategyNN") {
     state.strategyNet.enabled = (value == "true");
   } else if (name == "StrategyPolicyOutputs") {
-    state.strategyNet.cfg.policyOutputs = std::max(64, std::stoi(value));
+    state.strategyNet.cfg.policyOutputs = std::max(64, parseIntOrDefault(value, state.strategyNet.cfg.policyOutputs));
     state.strategyNet.load(state.strategyNet.weightsPath);
   } else if (name == "UseMultiRateThinking") {
     state.features.useMultiRateThinking = (value == "true");
@@ -485,25 +496,25 @@ void handleSetOption(State& state, const std::string& cmd) {
   } else if (name == "UsePolicyPruning") {
     state.features.usePolicyPruning = (value == "true");
   } else if (name == "PolicyTopK") {
-    state.features.policyTopK = std::max(1, std::stoi(value));
+    state.features.policyTopK = std::max(1, parseIntOrDefault(value, state.features.policyTopK));
   } else if (name == "UseLazyEval") {
     state.features.useLazyEval = (value == "true");
   } else if (name == "MasterEvalTopMoves") {
-    state.features.masterEvalTopMoves = std::clamp(std::stoi(value), 1, 8);
+    state.features.masterEvalTopMoves = std::clamp(parseIntOrDefault(value, state.features.masterEvalTopMoves), 1, 8);
   } else if (name == "UseAMXNNUEPath") {
     state.nnue.cfg.useAMXPath = (value == "true");
   } else if (name == "StrategyUseHardPhaseSwitch") {
     state.strategyNet.cfg.useHardPhaseSwitch = (value == "true");
   } else if (name == "StrategyActiveExperts") {
-    state.strategyNet.cfg.activeExperts = std::clamp(std::stoi(value), 1, 2);
+    state.strategyNet.cfg.activeExperts = std::clamp(parseIntOrDefault(value, state.strategyNet.cfg.activeExperts), 1, 2);
   } else if (name == "UseAdaptiveSwitching") {
     state.adaptiveSwitching = (value == "true");
   } else if (name == "UseSyzygy") {
     state.syzygy.enabled = (value == "true");
   } else if (name == "SyzygyProbeLimit") {
-    state.syzygy.probeLimit = std::clamp(std::stoi(value), 3, 7);
+    state.syzygy.probeLimit = std::clamp(parseIntOrDefault(value, state.syzygy.probeLimit), 3, 7);
   } else if (name == "SyzygyProbeDepth") {
-    state.syzygy.probeDepth = std::max(0, std::stoi(value));
+    state.syzygy.probeDepth = std::max(0, parseIntOrDefault(value, state.syzygy.probeDepth));
   } else if (name == "SyzygyProbeCommand") {
     state.syzygy.probeCommand = value;
   } else if (name == "ReviewerEnabled") {
@@ -571,15 +582,23 @@ search::Limits parseGoLimits(State& state, const std::string& cmd) {
   iss >> token;
   while (iss >> token) {
     if (token == "depth") {
-      iss >> limits.depth;
+      if (!(iss >> limits.depth)) {
+        iss.clear();
+      }
     } else if (token == "movetime") {
-      iss >> limits.movetimeMs;
+      if (!(iss >> limits.movetimeMs)) {
+        iss.clear();
+      }
     } else if (token == "infinite") {
       limits.infinite = true;
     } else if (token == "wtime" || token == "btime") {
-      iss >> state.timeManager.remainingMs;
+      if (!(iss >> state.timeManager.remainingMs)) {
+        iss.clear();
+      }
     } else if (token == "winc" || token == "binc") {
-      iss >> state.timeManager.incrementMs;
+      if (!(iss >> state.timeManager.incrementMs)) {
+        iss.clear();
+      }
     }
   }
   if (limits.movetimeMs == 0 && state.timeManager.remainingMs > 0) {
@@ -655,7 +674,7 @@ void handleGo(State& state, const std::string& cmd) {
   }
 
   const std::string key = openingKey(state);
-  const std::string bookMove = state.book.probe(key);
+  const std::string bookMove = state.cache.get(key);
   if (!bookMove.empty()) {
     movegen::Move parsedBookMove;
     if (movegen::parseUCIMove(bookMove, parsedBookMove) && movegen::isLegalMove(state.board, parsedBookMove)) {
