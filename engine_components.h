@@ -987,25 +987,6 @@ struct MCTSConfig {
 }  // namespace search_arch
 
 namespace opening {
-struct Book {
-  bool enabled = false;
-  std::string format = "polyglot";
-  std::string path = "book.bin";
-  std::unordered_map<std::string, std::string> moveByKey;
-
-  void seedDefaults() {
-    // Intentionally left empty: opening books should be data-driven.
-    // Keeping this hook allows callers to initialize from external sources
-    // without forcing a hard-coded first move.
-  }
-
-  std::string probe(const std::string& key) const {
-    if (!enabled) return "";
-    auto it = moveByKey.find(key);
-    return it == moveByKey.end() ? "" : it->second;
-  }
-};
-
 struct Novelty {
   std::unordered_map<std::string, int> seenPositions;
   bool isNovel(const std::string& key) {
@@ -1015,16 +996,9 @@ struct Novelty {
   }
 };
 
-struct BookBuilder {
-  std::vector<std::pair<std::string, std::string>> lines;
-  void addLine(const std::string& key, const std::string& move) { lines.push_back({key, move}); }
-};
-
 struct PrepModule {
   bool noveltySearch = false;
-  bool pruneBook = false;
   Novelty novelty;
-  BookBuilder builder;
 };
 }  // namespace opening
 

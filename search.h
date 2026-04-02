@@ -98,7 +98,14 @@ class Searcher {
 
     assignCandidateDepths(out, count, out.depth);
     iterativeDeepening(out, moves, limits, rng, stopFlag);
-    out.ponder = (moves.size() > 1) ? moves[1] : moves[0];
+    if (!movegen::isLegalMove(b, out.bestMove)) {
+      out.bestMove = moves.front();
+    }
+    board::Board ponderBoard = b;
+    if (ponderBoard.applyMove(out.bestMove.from, out.bestMove.to, out.bestMove.promotion)) {
+      const auto replies = movegen::generateLegal(ponderBoard);
+      if (!replies.empty()) out.ponder = replies.front();
+    }
     if (handcrafted_) {
       out.evalBreakdown = handcrafted_->breakdown();
     }
