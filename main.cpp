@@ -55,7 +55,6 @@ struct State {
   engine_components::eval_model::TransformerCritic transformerCritic;
   engine_components::eval_model::TrainingInfra training;
 
-  engine_components::opening::Book book;
   engine_components::opening::PrepModule prep;
   engine_components::timing::Manager timeManager;
   engine_components::tooling::Formats formats;
@@ -476,8 +475,6 @@ void handleSetOption(State& state, const std::string& cmd) {
     state.training.cat.enabled = (value == "true");
   } else if (name == "UseStrategyNN") {
     state.strategyNet.enabled = (value == "true");
-  } else if (name == "UseBook") {
-    state.book.enabled = (value == "true");
   } else if (name == "StrategyPolicyOutputs") {
     state.strategyNet.cfg.policyOutputs = std::max(64, std::stoi(value));
     state.strategyNet.load(state.strategyNet.weightsPath);
@@ -732,6 +729,21 @@ void handleGo(State& state, const std::string& cmd) {
       std::cout << "info string repaired_illegal_bestmove true\n";
     }
   }
+  movegen::Move safePonder{};
+  board::Board ponderBoard = state.board;
+  if (ponderBoard.applyMove(safeBest.from, safeBest.to, safeBest.promotion)) {
+    if (result.ponder.from >= 0 && movegen::isLegalMove(ponderBoard, result.ponder)) {
+      safePonder = result.ponder;
+    } else {
+      const auto legalPonderFallback = movegen::generateLegal(ponderBoard);
+      if (!legalPonderFallback.empty()) {
+        safePonder = legalPonderFallback.front();
+        if (result.ponder.from >= 0) {
+          std::cout << "info string repaired_illegal_ponder true\n";
+        }
+      }
+    }
+  }
 
   bool novel = state.prep.novelty.isNovel(key);
   std::cout << "info depth " << result.depth << " nodes " << result.nodes << " score cp " << result.scoreCp << " pv";
@@ -749,8 +761,8 @@ void handleGo(State& state, const std::string& cmd) {
   std::cout << "info string eval_breakdown " << result.evalBreakdown << '\n';
 
   std::cout << "bestmove " << safeBest.toUCI();
-  if (result.ponder.from >= 0) {
-    std::cout << " ponder " << result.ponder.toUCI();
+  if (safePonder.from >= 0) {
+    std::cout << " ponder " << safePonder.toUCI();
   }
   std::cout << '\n';
 
@@ -759,7 +771,6 @@ void handleGo(State& state, const std::string& cmd) {
   std::cout << "info string binpack_append " << (wroteBinpack ? "ok" : "failed") << '\n';
 
   state.cache.put(key, safeBest.toUCI());
-  state.prep.builder.addLine(key, safeBest.toUCI());
 }
 
 std::uint64_t perft(const board::Board& position, int depth) {
@@ -809,18 +820,6 @@ void runLoop(State& state) {
                 << " strategy_params=" << state.strategyNet.parameterCount()
                 << " tt_entries=" << state.tt.entries.size()
                 << " mcts_batch=" << state.mcts.miniBatchSize << "\n";
-    } else if (input == "buildbook") {
-      int imported = 0;
-      for (const auto& kv : state.prep.builder.lines) {
-        if (kv.first.empty() || kv.second.empty()) continue;
-        state.book.moveByKey[kv.first] = kv.second;
-        ++imported;
-      }
-      if (imported > 0) state.book.enabled = true;
-      std::cout << "info string book_lines " << state.prep.builder.lines.size()
-                << " imported=" << imported
-                << " entries=" << state.book.moveByKey.size()
-                << " enabled=" << (state.book.enabled ? "true" : "false") << '\n';
     } else if (input == "ipcmetrics") {
       engine_components::tooling::TrainingMetrics m;
       m.currentLoss = static_cast<float>(state.training.lossLearning.lossCases);
