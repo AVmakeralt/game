@@ -660,15 +660,23 @@ void handleGo(State& state, const std::string& cmd) {
   const std::string key = openingKey(state);
   const std::string bookMove = state.book.probe(key);
   if (!bookMove.empty()) {
-    std::cout << "info string book_hit true\n";
-    std::cout << "bestmove " << bookMove << "\n";
-    return;
+    movegen::Move parsedBookMove;
+    if (movegen::parseUCIMove(bookMove, parsedBookMove) && movegen::isLegalMove(state.board, parsedBookMove)) {
+      std::cout << "info string book_hit true\n";
+      std::cout << "bestmove " << bookMove << "\n";
+      return;
+    }
+    std::cout << "info string book_hit_illegal true move=" << bookMove << '\n';
   }
   const std::string cached = state.cache.get(key);
   if (!cached.empty()) {
-    std::cout << "info string cache_hit true\n";
-    std::cout << "bestmove " << cached << '\n';
-    return;
+    movegen::Move parsedCachedMove;
+    if (movegen::parseUCIMove(cached, parsedCachedMove) && movegen::isLegalMove(state.board, parsedCachedMove)) {
+      std::cout << "info string cache_hit true\n";
+      std::cout << "bestmove " << cached << '\n';
+      return;
+    }
+    std::cout << "info string cache_hit_illegal true move=" << cached << '\n';
   }
 
   const MaterialProfile profile = materialProfile(state.board);
