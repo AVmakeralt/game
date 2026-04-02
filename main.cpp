@@ -655,6 +655,16 @@ void handleGo(State& state, const std::string& cmd) {
   }
 
   const std::string key = openingKey(state);
+  const std::string bookMove = state.book.probe(key);
+  if (!bookMove.empty()) {
+    movegen::Move parsedBookMove;
+    if (movegen::parseUCIMove(bookMove, parsedBookMove) && movegen::isLegalMove(state.board, parsedBookMove)) {
+      std::cout << "info string book_hit true\n";
+      std::cout << "bestmove " << bookMove << "\n";
+      return;
+    }
+    std::cout << "info string book_hit_illegal true move=" << bookMove << '\n';
+  }
   const std::string cached = state.cache.get(key);
   if (!cached.empty()) {
     movegen::Move parsedCachedMove;
