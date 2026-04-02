@@ -1,0 +1,3 @@
+/workspaces/leviathan/build/CMakeFiles/chess_engine.dir
+/workspaces/leviathan/build/CMakeFiles/edit_cache.dir
+/workspaces/leviathan/build/CMakeFiles/rebuild_cache.dir

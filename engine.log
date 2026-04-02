@@ -1,0 +1,5 @@
+engine initialized with search/eval/tooling scaffolding
+warning: nnue weights missing or incompatible; nnue disabled
+warning: strategy weights missing or incompatible; strategy net disabled
+nnue_params=9442305 strategy_params=8153347
+engine shutdown

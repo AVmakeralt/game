@@ -202,7 +202,7 @@ struct NNUEConfig {
 
 struct NNUE {
   bool enabled = true;
-  std::string weightsPath = "eval.nnue";
+  std::string weightsPath = "NNUE.pt";
   NNUEConfig cfg{};
   std::vector<float> w1;
   std::vector<float> b1;
@@ -556,7 +556,7 @@ struct StrategyOutput {
 
 struct StrategyNet {
   bool enabled = true;
-  std::string weightsPath = "meganet.lc0";
+  std::string weightsPath = "meganet.pt";
   StrategyConfig cfg{};
   std::array<ExpertProfile, 3> profiles{{
       ExpertProfile{2, 4, 0.15f},  // Theorist (opening): higher policy confidence
@@ -818,7 +818,7 @@ struct StrategyNet {
 
 struct PolicyNet {
   bool enabled = false;
-  std::string name = "blitz net";
+  std::string name = "blitznet.pt";
   std::vector<float> priors;
 
   std::size_t parameterCount() const {

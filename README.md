@@ -52,10 +52,10 @@ Engine emits runtime instrumentation fields in `info` and `perft` output:
 - transposition-table hit/probe counters
 
 Default neural weights file names used by the engine:
-- NNUE: `eval.nnue` (auto-falls back to bundled `nn-*.nnue` when `eval.nnue` is not present)
-- Strategy net: `meganet.lc0`
+- NNUE: `NNUE.pt` (auto-falls back to bundled `nn-*.nnue` when `NNUE.pt` is not present)
+- Strategy net: `meganet.pt`
 
-Download example strategy weights (`meganet.lc0`):
+Download example strategy weights (`meganet.pt`):
 - Google Drive: https://drive.google.com/file/d/1hDyPmXxiTFg6eAU84ya2AqWdLGQCWqBm/view?usp=drive_link
 
 ## Regression checks

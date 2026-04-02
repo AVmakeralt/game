@@ -132,11 +132,11 @@ bool startsWith(const std::string& text, const std::string& prefix) {
   return text.size() >= prefix.size() && text.compare(0, prefix.size(), prefix) == 0;
 }
 
-constexpr const char* kDefaultStrategyWeights = "meganet.lc0";
+constexpr const char* kDefaultStrategyWeights = "meganet.pt";
 
 std::string resolveDefaultNNUEWeightsPath() {
   namespace fs = std::filesystem;
-  constexpr const char* kPreferred = "eval.nnue";
+  constexpr const char* kPreferred = "NNUE.pt";
 
   std::error_code ec;
   if (fs::is_regular_file(kPreferred, ec)) return kPreferred;
@@ -149,7 +149,8 @@ std::string resolveDefaultNNUEWeightsPath() {
     if (ec || !entry.is_regular_file()) continue;
 
     const fs::path candidate = entry.path().filename();
-    if (candidate.extension() != ".nnue") continue;
+    auto ext = candidate.extension().string();
+    if (ext != ".nnue" && ext != ".pt") continue;
 
     const std::string name = candidate.string();
     if (startsWith(name, "nn-")) return name;
@@ -401,7 +402,7 @@ void initialize(State& state) {
   const bool strategyLoaded = state.strategyNet.load(kDefaultStrategyWeights);
   state.transformerCritic.load("chess_transformer_25m.pt");
   state.policy.priors = {0.70f, 0.20f, 0.10f};
-  state.policy.name = "blitz net";
+  state.policy.name = "blitznet.pt";
   state.ramTablebase.enabled = false;
   state.cache.load(state.openingCachePath);
   state.logFile.open("engine.log", std::ios::app);

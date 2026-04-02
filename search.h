@@ -106,10 +106,10 @@ class Searcher {
       out.evalBreakdown += " nnue=on(" + std::to_string(nnue_->parameterCount()) + ")";
     }
     if (strategyNet_ && strategyNet_->enabled) {
-      out.evalBreakdown += " meganet_lc0=on(" + std::to_string(strategyNet_->parameterCount()) + ")";
+      out.evalBreakdown += " meganet_pt=on(" + std::to_string(strategyNet_->parameterCount()) + ")";
     }
     if (policy_ && policy_->enabled) {
-      out.evalBreakdown += " blitz_net=on(" + std::to_string(policy_->parameterCount()) + ")";
+      out.evalBreakdown += " blitznet_pt=on(" + std::to_string(policy_->parameterCount()) + ")";
     }
     if (transformerCritic_ && transformerCritic_->enabled) {
       out.evalBreakdown += " transformer=on(" + std::to_string(transformerCritic_->parameterCount()) + ")";
